@@ -121,6 +121,8 @@ TEST(rocrand_config_dispatch_tests, parse_common_architectures)
     ASSERT_EQ(parse_gcn_arch("gfx906:::"), target_arch::gfx906);
     ASSERT_EQ(parse_gcn_arch("gfx908:"), target_arch::gfx908);
     ASSERT_EQ(parse_gcn_arch("gfx90a:sramecc+:xnack-"), target_arch::gfx90a);
+    ASSERT_EQ(parse_gcn_arch("gfx1013"), target_arch::gfx1013);
+    ASSERT_EQ(parse_gcn_arch("gfx1013:xnack-"), target_arch::gfx1013);
 }
 
 TEST(rocrand_config_dispatch_tests, get_config_on_host_and_device)
