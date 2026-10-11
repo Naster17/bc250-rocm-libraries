@@ -60,6 +60,7 @@ option(HIPBLASLT_ENABLE_EXTOPS "Build hipBLASLt ExtOp device libraries." ON)
 option(HIPBLASLT_ENABLE_MATRIX_TRANSFORM "Build hipBLASLt MatrixTransform device library." ON)
 option(HIPBLASLT_ENABLE_CLIENT "Build hipBLASLt client apps." ON)
 option(HIPBLASLT_ENABLE_HOST "Build hipBLASLt host library." ON)
+option(HIPBLASLT_HOST_API_ONLY "Build host descriptor APIs without a GEMM backend." OFF)
 option(HIPBLASLT_BUILD_SHARED_LIBS "Build the hipBLASLt library as shared vs static." ON)
 option(TENSILELITE_BUILD_SHARED_LIBS "Build the TensileLite host library as shared vs static." ON)
 option(HIPBLASLT_ENABLE_FETCH "Fetch dependencies using fetch content" OFF)
@@ -133,12 +134,22 @@ mark_as_advanced(TENSILELITE_ENABLE_AUTOBUILD)
 
 set(GPU_TARGETS "" CACHE STRING "AMD GFX targets to cross-compile")
 
-if(NOT GPU_TARGETS OR GPU_TARGETS STREQUAL "all")
-    tensilelite_get_base_architectures(GPU_TARGETS)
+if(HIPBLASLT_HOST_API_ONLY)
+    if(NOT HIPBLASLT_ENABLE_HOST OR HIPBLASLT_ENABLE_DEVICE OR HIPBLASLT_ENABLE_ROCROLLER
+       OR HIPBLASLT_ENABLE_EXTOPS OR HIPBLASLT_ENABLE_MATRIX_TRANSFORM)
+        message(FATAL_ERROR "HIPBLASLT_HOST_API_ONLY requires host support and no device backends")
+    endif()
+    if(NOT GPU_TARGETS OR GPU_TARGETS STREQUAL "all")
+        message(FATAL_ERROR "HIPBLASLT_HOST_API_ONLY requires explicit native GPU_TARGETS")
+    endif()
 else()
-    tensilelite_validate_gpu_targets("${GPU_TARGETS}")
+    if(NOT GPU_TARGETS OR GPU_TARGETS STREQUAL "all")
+        tensilelite_get_base_architectures(GPU_TARGETS)
+    else()
+        tensilelite_validate_gpu_targets("${GPU_TARGETS}")
+    endif()
+    tensilelite_normalize_targets(GPU_TARGETS ${GPU_TARGETS})
 endif()
-tensilelite_normalize_targets(GPU_TARGETS ${GPU_TARGETS})
 message(STATUS "Building for GPU targets: ${GPU_TARGETS}")
 
 find_package(hip REQUIRED)
@@ -383,6 +394,8 @@ set(BUILD_SHARED_LIBS "${HIPBLASLT_BUILD_SHARED_LIBS}")
 
 if(HIPBLASLT_ENABLE_HOST)
     add_library(hipblaslt)
+    target_compile_definitions(hipblaslt PRIVATE
+        HIPBLASLT_HOST_API_ONLY=$<BOOL:${HIPBLASLT_HOST_API_ONLY}>)
     if(WIN32 AND BUILD_SHARED_LIBS AND _hipblaslt_have_version_rc)
         target_sources(
             hipblaslt

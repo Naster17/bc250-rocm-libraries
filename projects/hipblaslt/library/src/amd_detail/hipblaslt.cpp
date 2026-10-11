@@ -60,7 +60,11 @@ hipblasStatus_t RocBlasLtStatusToHIPStatus(rocblaslt_status_ status)
     case rocblaslt_status_invalid_handle:
         return HIPBLAS_STATUS_NOT_INITIALIZED;
     case rocblaslt_status_not_implemented:
+#if HIPBLASLT_HOST_API_ONLY
+        return HIPBLAS_STATUS_NOT_SUPPORTED;
+#else
         return HIPBLAS_STATUS_INTERNAL_ERROR;
+#endif
     case rocblaslt_status_invalid_pointer:
         return HIPBLAS_STATUS_INVALID_VALUE;
     case rocblaslt_status_invalid_size:
@@ -1170,6 +1174,10 @@ hipblasStatus_t hipblasLtMatmul(hipblasLtHandle_t            handle,
 try
 {
     rocblaslt::Debug::Instance().markerStart("hipblasLtMatmul");
+#if HIPBLASLT_HOST_API_ONLY
+    rocblaslt::Debug::Instance().markerStop();
+    return HIPBLAS_STATUS_NOT_SUPPORTED;
+#endif
     hipblasStatus_t return_status = HIPBLAS_STATUS_SUCCESS;
 
 #if HIPBLASLT_HAS_GEMM_A2A_FUSION

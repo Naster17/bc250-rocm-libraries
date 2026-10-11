@@ -2348,6 +2348,9 @@ rocblaslt_status
         log_error(__func__, "invalid requested count", requestedAlgoCount);
         return rocblaslt_status_invalid_value;
     }
+#if HIPBLASLT_HOST_API_ONLY
+    return rocblaslt_status_not_implemented;
+#endif
     rocblaslt_status status = rocblaslt_status_success;
     try
     {
