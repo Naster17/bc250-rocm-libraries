@@ -1397,7 +1397,7 @@ struct DeviceConvNdBwdDataNwcKxcNwk_Dl
     static bool IsSupportedArgument(const Argument& arg)
     {
         // check device
-        if(!(ck::get_device_name() == "gfx906" || ck::is_gfx103_supported() ||
+        if(!(ck::get_device_name() == "gfx906" || ck::is_gfx101_supported() || ck::is_gfx103_supported() ||
              ck::is_gfx11_supported() || ck::is_gfx12_supported()))
         {
             return false;
