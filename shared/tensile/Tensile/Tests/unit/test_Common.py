@@ -29,6 +29,7 @@ import Tensile.Common as Common
 import os
 
 import pytest
+from Tensile.AsmCaps import getCapabilitiesCache
 
 
 @pytest.fixture
@@ -97,6 +98,19 @@ def test_gfxArch():
     assert Common.gfxArch('gfx906') == (9,0,6)
 
     assert Common.gfxArch('gfx1010') == (10,1,0)
+    assert Common.gfxArch('gfx1013:xnack-') == (10,1,3)
+
+
+def test_bc250_target_and_capabilities():
+    isa = (10, 1, 3)
+    assert isa in Common.globalParameters["SupportedISA"]
+    assert Common.getArchitectureName("gfx1013") == "gfx1013"
+    assert Common.gfxName(isa) == "gfx1013"
+    caps = getCapabilitiesCache(Common.SemanticVersion(10, 2, 0))[isa]
+    assert caps["SupportedISA"] and caps["SupportedSource"]
+    assert not caps["HasMFMA"]
+    assert not caps["HasWMMA"]
+    assert Common.GetArchCaps(isa)["HasWave32"]
 
     assert Common.gfxArch('gfx90015') == (900,1,5)
 

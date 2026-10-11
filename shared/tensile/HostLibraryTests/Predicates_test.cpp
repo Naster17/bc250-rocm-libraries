@@ -27,6 +27,18 @@
 #include <gtest/gtest.h>
 
 #include <Tensile/ContractionProblemPredicates.hpp>
+#include <Tensile/AMDGPU.hpp>
+#include <Tensile/PlaceholderLibrary.hpp>
+
+TEST(Predicates, NativeCyanSkillfishIdentity)
+{
+    using namespace Tensile;
+    AMDGPU gpu;
+    EXPECT_EQ(AMDGPU::Processor::gfx1013, gpu.toProcessorId("gfx1013:xnack-"));
+    EXPECT_EQ("gfx1013", AMDGPU::toString(AMDGPU::Processor::gfx1013));
+    EXPECT_EQ("TensileLibrary_*_gfx1013", RegexPattern(LazyLoadingInit::gfx1013));
+    EXPECT_EQ(AMDGPU::Processor::gfx1012, gpu.toProcessorId("gfx1012:xnack-"));
+}
 
 TEST(Predicates, ArithmeticIntensity)
 {
