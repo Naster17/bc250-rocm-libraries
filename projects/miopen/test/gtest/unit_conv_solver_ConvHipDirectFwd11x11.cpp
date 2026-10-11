@@ -23,7 +23,7 @@ const auto& GetTestParams()
 {
     static const auto params = [] {
         Gpu supported_gpus = Gpu::gfx900 | Gpu::gfx906 | Gpu::gfx908 | Gpu::gfx90A | Gpu::gfx94X |
-                             Gpu::gfx950 | Gpu::gfx103X | Gpu::gfx110X | Gpu::gfx115X |
+                             Gpu::gfx950 | Gpu::gfx1013 | Gpu::gfx103X | Gpu::gfx110X | Gpu::gfx115X |
                              Gpu::gfx120X;
         auto p = miopen::unit_tests::UnitTestConvSolverParams(supported_gpus);
         p.SetTolerance(supported_gpus, miopenFloat, 3.0f);

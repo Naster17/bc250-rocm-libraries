@@ -88,6 +88,8 @@ Gpu GetGpuType(const std::string& dev_name)
         return Gpu::gfx94X;
     if(miopen::StartsWith(arch, "gfx95"))
         return Gpu::gfx950;
+    if(arch == "gfx1013")
+        return Gpu::gfx1013;
     if(miopen::StartsWith(arch, "gfx103"))
         return Gpu::gfx103X;
     if(miopen::StartsWith(arch, "gfx110"))
@@ -109,7 +111,7 @@ Gpu GetDevGpuType()
 
 const std::multimap<Gpu, DevDescription>& GetAllKnownDevices()
 {
-    static_assert(Gpu::gfx125X == Gpu::gfxLast);
+    static_assert(Gpu::gfx1013 == Gpu::gfxLast);
 
     // https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html
     static const std::multimap<Gpu, DevDescription> known_devs = {
@@ -123,6 +125,7 @@ const std::multimap<Gpu, DevDescription>& GetAllKnownDevices()
         {Gpu::gfx94X,  {"gfx942",  228, 64}},
         {Gpu::gfx94X,  {"gfx942",  304, 64}},
         {Gpu::gfx950,  {"gfx950",  256, 64}},
+        {Gpu::gfx1013, {"gfx1013", 20, 32}}, // BC-250: 40 CUs, 20 WGPs
         {Gpu::gfx103X, {"gfx1030", 30, 32}},
         {Gpu::gfx103X, {"gfx1030", 36, 32}},
         {Gpu::gfx103X, {"gfx1030", 40, 32}},
