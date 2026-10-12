@@ -298,7 +298,8 @@ RppStatus hip_exec_spectrogram_tensor(Rpp32f* srcPtr, RpptDescPtr srcDescPtr, Rp
                             ceil((float)globalThreads_z / LOCAL_THREADS_Z)),
                        dim3(LOCAL_THREADS_X, LOCAL_THREADS_Y, LOCAL_THREADS_Z), 0,
                        handle.GetStream(), windowOutput, make_uint2(windowOutputStride, nfft),
-                       dstPtr, make_uint2(dstDescPtr->strides.nStride, maxNumWindows),
+                       dstPtr, make_uint2(dstDescPtr->strides.nStride,
+                                          dstDescPtr->strides.hStride),
                        numWindowsTensor, cosTensor, sinTensor,
                        make_int4(nfft, numBins, power, numTiles), vertical);
     HIP_CHECK_LAUNCH_RETURN();
