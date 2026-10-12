@@ -143,6 +143,12 @@ TEST(RocprimConfigDispatchTests, ParseCommonArches)
     ASSERT_EQ(parse_gcn_arch("gfx906:::"), target_arch::gfx906);
     ASSERT_EQ(parse_gcn_arch("gfx908:"), target_arch::gfx908);
     ASSERT_EQ(parse_gcn_arch("gfx90a:sramecc+:xnack-"), target_arch::gfx90a);
+    ASSERT_EQ(parse_gcn_arch("gfx1013"), target_arch::gfx1013);
+    ASSERT_EQ(parse_gcn_arch("gfx1013:xnack-"), target_arch::gfx1013);
+    ASSERT_EQ(parse_gcn_arch("gfx10130"), target_arch::unknown);
+    ASSERT_EQ(parse_gcn_arch("gfx1013suffix"), target_arch::unknown);
+    ASSERT_EQ(rocprim::detail::gen_from_target_arch(target_arch::gfx1013),
+              rocprim::detail::gen::rdna1);
 }
 
 #ifndef _WIN32
