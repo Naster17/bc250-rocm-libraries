@@ -119,6 +119,11 @@ add_compile_options("-Wno-unused-result")
 # Add library
 add_library(${PROJECT_NAME} OBJECT ${Rpp_Source})
 target_link_libraries(${PROJECT_NAME} PUBLIC HALF::half)
+if(RPP_AUDIO_SUPPORT)
+    # Spectrogram sources belong to this object library, so they need FFTS's
+    # headers while compiling, before the final shared library is linked.
+    target_link_libraries(${PROJECT_NAME} PRIVATE FFTS::FFTS)
+endif()
 
 # Target settings
 set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
