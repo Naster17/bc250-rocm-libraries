@@ -46,7 +46,11 @@ namespace hiptensor
 
         std::string deviceName(mProps.gcnArchName);
 
-        if(deviceName.find("gfx908") != std::string::npos)
+        if(deviceName.find("gfx1013") != std::string::npos)
+        {
+            mGcnArch = hipGcnArch_t::GFX1013;
+        }
+        else if(deviceName.find("gfx908") != std::string::npos)
         {
             mGcnArch = hipGcnArch_t::GFX908;
         }
@@ -137,6 +141,10 @@ namespace hiptensor
 
     bool HipDevice::supportsF64() const
     {
+        if(mGcnArch == HipDevice::hipGcnArch_t::GFX1013)
+        {
+            return mArch.hasDoubles;
+        }
         return (mGcnArch == HipDevice::hipGcnArch_t::GFX90A
                 || mGcnArch == HipDevice::hipGcnArch_t::GFX942
                 || mGcnArch == HipDevice::hipGcnArch_t::GFX950

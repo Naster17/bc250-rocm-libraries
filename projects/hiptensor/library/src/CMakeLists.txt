@@ -83,10 +83,14 @@ endfunction()
 
 # Create shared library target
 function(create_hiptensor_shared_library)
+    set(_contraction_device_objects)
+    if(NOT HIPTENSOR_GENERIC_ONLY)
+        list(APPEND _contraction_device_objects $<TARGET_OBJECTS:hiptensor_contraction_instances>)
+    endif()
     add_library(hiptensor SHARED
         $<TARGET_OBJECTS:hiptensor_core>
         $<TARGET_OBJECTS:hiptensor_contraction>
-        $<TARGET_OBJECTS:hiptensor_contraction_instances>
+        ${_contraction_device_objects}
         $<TARGET_OBJECTS:hiptensor_elementwise>
         $<TARGET_OBJECTS:hiptensor_reduction>
     )

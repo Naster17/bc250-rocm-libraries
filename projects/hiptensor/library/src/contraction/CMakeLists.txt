@@ -36,4 +36,6 @@ set(HIPTENSOR_CONTRACTION_SOURCES
 
 add_hiptensor_component(hiptensor_contraction ${HIPTENSOR_CONTRACTION_SOURCES})
 
-add_subdirectory(device)
+if(NOT HIPTENSOR_GENERIC_ONLY)
+    add_subdirectory(device)
+endif()

@@ -35,15 +35,18 @@
 #include <hip/hip_complex.h>
 
 // Ensure access to
+#if !HIPTENSOR_GENERIC_ONLY
 #include "device/hiptensor_contraction_bilinear_instances.hpp"
 #include "device/hiptensor_contraction_bilinear_unary_ops_instances.hpp"
 #include "device/hiptensor_contraction_scale_instances.hpp"
 #include "device/hiptensor_contraction_scale_unary_ops_instances.hpp"
+#endif
 
 namespace hiptensor
 {
     ContractionSolutionInstances::ContractionSolutionInstances()
     {
+#if !HIPTENSOR_GENERIC_ONLY
         // Register all the solutions exactly once
 
         // Bilinear bf16
@@ -559,5 +562,6 @@ namespace hiptensor
                                           ck::tensor_operation::element_wise::PassThrough,
                                           ck::tensor_operation::element_wise::ScaleComplex,
                                           hipDoubleComplex>());
+#endif
     }
 } // namespace hiptensor

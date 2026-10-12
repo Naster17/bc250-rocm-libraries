@@ -81,6 +81,7 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O1 -ggdb")           # c
 set(CMAKE_CXX_FLAGS_MINSIZEREL "${CMAKE_CXX_FLAGS_MINSIZEREL} -O2 -DNDEBUG") # clang++ failed to build the project with the default -Os
 
 # Project options
+option(HIPTENSOR_GENERIC_ONLY "Build generic elementwise and reduction operations without contraction device kernels" OFF)
 if(CMAKE_PROJECT_NAME STREQUAL "hiptensor")
     option(HIPTENSOR_BUILD_TESTS "Build hiptensor tests" ON)
     option(HIPTENSOR_BUILD_SAMPLES "Build hiptensor samples" ON)
@@ -92,6 +93,11 @@ if(CMAKE_PROJECT_NAME STREQUAL "hiptensor")
     if(WIN32)
         option(CREATE_TEST_APP_LOCAL_DEPLOY "Copy ROCm runtime DLLs next to test binaries so they take precedence over System32 (Windows only)" OFF)
     endif()
+endif()
+if(HIPTENSOR_GENERIC_ONLY)
+    add_compile_definitions(HIPTENSOR_GENERIC_ONLY=1)
+else()
+    add_compile_definitions(HIPTENSOR_GENERIC_ONLY=0)
 endif()
 
 # Setup output paths

@@ -28,6 +28,10 @@ set(DEFAULT_ARCHITECTURES
     gfx12-generic
 )
 
+if(HIPTENSOR_GENERIC_ONLY)
+    list(APPEND SUPPORTED_ARCHITECTURES gfx1013)
+endif()
+
 function(hiptensor_is_supported_architecture ARCHITECTURE_NAME RESULT_VAR)
     list(FIND SUPPORTED_ARCHITECTURES "${ARCHITECTURE_NAME}" INDEX)
     if (INDEX EQUAL -1)
