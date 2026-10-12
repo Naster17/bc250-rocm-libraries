@@ -183,7 +183,7 @@ function(add_hiptensor_test BINARY_NAME YAML_CONFIG_FILE TEST_SOURCES)
     # - hiptensor_test_NAME
     # - hiptensor_test_YAML_STRING
     # - hiptensor_test_YAML_INCLUDE_FILE
-    get_filename_component(hiptensor_test_YAML_DIR "${YAML_CONFIG_FILE}" PATH)
+    set(hiptensor_test_YAML_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/${BINARY_NAME}")
     get_filename_component(hiptensor_test_NAME "${YAML_CONFIG_FILE}" NAME_WE)
     set(hiptensor_test_YAML_INCLUDE_FILE "${hiptensor_test_NAME}.hpp")
     configure_file("${PROJECT_SOURCE_DIR}/test/hiptensor-test-yaml.hpp.in"

@@ -217,7 +217,11 @@ endif()
 # disable warning about 'amdgpu-waves-per-eu'
 add_compile_options(-Wno-pass-failed)
 
-find_package(composable_kernel 1.0.0 REQUIRED COMPONENTS device_contraction_operations device_reduction_operations device_other_operations)
+set(_hiptensor_ck_components device_reduction_operations device_other_operations)
+if(NOT HIPTENSOR_GENERIC_ONLY)
+    list(APPEND _hiptensor_ck_components device_contraction_operations)
+endif()
+find_package(composable_kernel 1.0.0 REQUIRED COMPONENTS ${_hiptensor_ck_components})
 rocm_package_add_dependencies("composable_kernel >= 1.0.0" COMPONENT tests)
 
 # Configure library build
@@ -247,7 +251,7 @@ rocm_setup_version(VERSION ${VERSION_STRING})
 
 # Configure a header file to pass the CMake version settings to the source
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/library/include/hiptensor/internal/hiptensor-version.h.in"
-               "${CMAKE_CURRENT_SOURCE_DIR}/library/include/hiptensor/internal/hiptensor-version.h")
+               "${PROJECT_BINARY_DIR}/include/hiptensor/internal/hiptensor-version.h")
 
 # Configure Windows version resource file so hiptensor.dll exposes file metadata
 # (File description, version, product name, copyright) in Explorer properties.
