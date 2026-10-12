@@ -122,7 +122,8 @@ inline bool isF16Supported()
 
     std::string deviceName(mProps.gcnArchName);
 
-    return (deviceName.find("gfx908") != std::string::npos)
+    return (deviceName.find("gfx1013") != std::string::npos)
+           || (deviceName.find("gfx908") != std::string::npos)
            || (deviceName.find("gfx90a") != std::string::npos)
            || (deviceName.find("gfx942") != std::string::npos)
            || (deviceName.find("gfx950") != std::string::npos)
@@ -149,7 +150,8 @@ inline bool isF32Supported()
 
     std::string deviceName(mProps.gcnArchName);
 
-    return (deviceName.find("gfx908") != std::string::npos)
+    return (deviceName.find("gfx1013") != std::string::npos)
+           || (deviceName.find("gfx908") != std::string::npos)
            || (deviceName.find("gfx90a") != std::string::npos)
            || (deviceName.find("gfx942") != std::string::npos)
            || (deviceName.find("gfx950") != std::string::npos)
@@ -176,7 +178,8 @@ inline bool isF64Supported()
 
     std::string deviceName(mProps.gcnArchName);
 
-    return (deviceName.find("gfx90a") != std::string::npos)
+    return ((deviceName.find("gfx1013") != std::string::npos) && mProps.arch.hasDoubles)
+           || (deviceName.find("gfx90a") != std::string::npos)
            || (deviceName.find("gfx942") != std::string::npos)
            || (deviceName.find("gfx950") != std::string::npos)
            || (deviceName.find("gfx1250") != std::string::npos);
