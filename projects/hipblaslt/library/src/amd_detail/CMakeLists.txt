@@ -3,6 +3,10 @@
 
 add_subdirectory(rocblaslt)
 
+if(HIPBLASLT_ENABLE_GFX1013_SCALAR)
+    target_sources(hipblaslt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gfx1013_scalar.cpp")
+endif()
+
 target_sources(hipblaslt
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt_ostream.cpp"

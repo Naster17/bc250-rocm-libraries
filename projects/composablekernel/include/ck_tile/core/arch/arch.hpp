@@ -100,6 +100,7 @@ enum struct amdgcn_target_id
     GFX90A         = 0x090A,
     GFX942         = 0x0942,
     GFX950         = 0x0950,
+    GFX1013        = 0x1013,
     GFX1030        = 0x1030,
     GFX1031        = 0x1031,
     GFX1032        = 0x1032,
@@ -134,6 +135,7 @@ CK_TILE_HOST_DEVICE constexpr const char* to_string(amdgcn_target_id target_id)
     case amdgcn_target_id::GFX90A: return "GFX90A";
     case amdgcn_target_id::GFX942: return "GFX942";
     case amdgcn_target_id::GFX950: return "GFX950";
+    case amdgcn_target_id::GFX1013: return "GFX1013";
     case amdgcn_target_id::GFX1030: return "GFX1030";
     case amdgcn_target_id::GFX1031: return "GFX1031";
     case amdgcn_target_id::GFX1032: return "GFX1032";
@@ -164,6 +166,7 @@ CK_TILE_HOST_DEVICE constexpr const char* to_string(amdgcn_target_id target_id)
 enum struct amdgcn_target_family_id
 {
     GFX9    = 0x09,
+    GFX10_1 = 0x101,
     GFX10_3 = 0x10,
     GFX11   = 0x11,
     GFX12   = 0x12,
@@ -180,6 +183,7 @@ CK_TILE_HOST_DEVICE constexpr const char* to_string(amdgcn_target_family_id fami
     switch(family_id)
     {
     case amdgcn_target_family_id::GFX9: return "GFX9";
+    case amdgcn_target_family_id::GFX10_1: return "GFX10_1";
     case amdgcn_target_family_id::GFX10_3: return "GFX10_3";
     case amdgcn_target_family_id::GFX11: return "GFX11";
     case amdgcn_target_family_id::GFX12: return "GFX12";
@@ -408,7 +412,15 @@ static constexpr bool is_target_wave_size_64()
  */
 constexpr auto get_compiler_target()
 {
-    MAP_COMPILER_STATE_TO_GFX9_TARGET(CK_TILE_ARCH_GFX908, GFX908);
+    if constexpr(amdgcn_compiler_target_state::CK_TILE_ARCH_GFX1013)
+    {
+        return amdgcn_target<amdgcn_target_id::GFX1013,
+                             amdgcn_target_family_id::GFX10_1,
+                             amdgcn_target_arch_id::RDNA,
+                             amdgcn_target_wave_size_id::WAVE32>{};
+    }
+    else
+        MAP_COMPILER_STATE_TO_GFX9_TARGET(CK_TILE_ARCH_GFX908, GFX908);
     MAP_COMPILER_STATE_TO_GFX9_TARGET(CK_TILE_ARCH_GFX90A, GFX90A);
     MAP_COMPILER_STATE_TO_GFX9_TARGET(CK_TILE_ARCH_GFX942, GFX942);
     MAP_COMPILER_STATE_TO_GFX9_TARGET(CK_TILE_ARCH_GFX950, GFX950);
@@ -484,6 +496,13 @@ static constexpr auto getCMakeCompilerTarget()
                  id == amdgcn_target_id::GFX942 || id == amdgcn_target_id::GFX950)
     {
         return make_amdgcn_gfx9_target<id>();
+    }
+    else if constexpr(id == amdgcn_target_id::GFX1013)
+    {
+        return amdgcn_target<id,
+                             amdgcn_target_family_id::GFX10_1,
+                             amdgcn_target_arch_id::RDNA,
+                             amdgcn_target_wave_size_id::WAVE32>{};
     }
     else if constexpr(id == amdgcn_target_id::GFX1030 || id == amdgcn_target_id::GFX1031 ||
                       id == amdgcn_target_id::GFX1032 || id == amdgcn_target_id::GFX1033 ||
@@ -1119,6 +1138,10 @@ CK_TILE_HOST bool is_wave32()
  */
 CK_TILE_HOST_DEVICE constexpr index_t get_warp_size()
 {
+    // Launch dimensions and tile template types must agree in both compiler passes.
+    if constexpr(core::arch::getCMakeCompilerTarget().TARGET_ID ==
+                 core::arch::amdgcn_target_id::GFX1013)
+        return 32;
     return static_cast<index_t>(core::arch::get_compiler_target().WAVE_SIZE_ID);
 }
 

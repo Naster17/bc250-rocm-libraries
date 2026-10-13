@@ -24,6 +24,9 @@ struct ElementWiseKernel
     static constexpr index_t kBlockSize = Problem::BlockShape::kBlockSize;
     CK_TILE_HOST static constexpr auto BlockSize()
     {
+        if constexpr(core::arch::getCMakeCompilerTarget().TARGET_ID ==
+                     core::arch::amdgcn_target_id::GFX1013)
+            return kBlockSize; // The configured shape already uses native wave32.
         return is_wave32() ? kBlockSize / 2 : kBlockSize;
     }
 
@@ -38,6 +41,14 @@ struct ElementWiseKernel
                                    YDataType* p_y) const
     {
         using S = typename Problem::BlockShape;
+        // Runtime strides and odd row lengths do not establish a contiguous
+        // vector of S::kVectorM elements. A false hint crosses transpose and
+        // padded row/tail boundaries. Keep the per-thread tile vector, but
+        // address its elements individually on the native path.
+        constexpr index_t vectorHint =
+            core::arch::getCMakeCompilerTarget().TARGET_ID == core::arch::amdgcn_target_id::GFX1013
+                ? 1
+                : S::kVectorM;
 
         // Setup block-level coordinates and transforms
         const index_t iM           = get_block_id() * S::kBlockM;
@@ -49,7 +60,7 @@ struct ElementWiseKernel
         const auto x_tiles = ck_tile::generate_tuple(
             [&](auto i) {
                 const auto tensor_view = make_naive_tensor_view<address_space_enum::global>(
-                    input_tensors.get(i), lens, input_strides, number<S::kVectorM>{}, number<1>{});
+                    input_tensors.get(i), lens, input_strides, number<vectorHint>{}, number<1>{});
 
                 const auto transformed_tensor = pad_tensor_view(
                     transform_tensor_view(
@@ -88,7 +99,7 @@ struct ElementWiseKernel
 
         // Setup output window and store the result tile.
         const auto y_m_n = make_naive_tensor_view<address_space_enum::global>(
-            p_y, lens, output_strides, number<S::kVectorM>{});
+            p_y, lens, output_strides, number<vectorHint>{});
 
         const auto transformed_y_m_n =
             pad_tensor_view(transform_tensor_view(

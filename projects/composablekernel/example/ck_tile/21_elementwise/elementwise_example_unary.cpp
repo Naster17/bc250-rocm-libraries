@@ -53,6 +53,9 @@ bool run(const ck_tile::ArgParser& arg_parser)
     ck_tile::DeviceMem x_buf_a(x_host_a.get_element_space_size_in_bytes());
     ck_tile::DeviceMem y_buf(y_host.get_element_space_size_in_bytes());
     x_buf_a.ToDevice(x_host_a.data());
+    // Preserve and validate padding between rows, including the strided regression.
+    std::fill(y_host.mData.begin(), y_host.mData.end(), ck_tile::type_convert<YDataType>(-7.f));
+    y_buf.ToDevice(y_host.data());
 
     // 3. Create the kernel
 
@@ -105,8 +108,8 @@ bool run(const ck_tile::ArgParser& arg_parser)
                                           kBlockSize,
                                           0,
                                           input_size,
-                                          ck_tile::make_tuple(N, 1), // Input Stride
-                                          ck_tile::make_tuple(N, 1), // Output Stride
+                                          ck_tile::make_tuple(stride, 1), // Input Stride
+                                          ck_tile::make_tuple(stride, 1), // Output Stride
                                           input_tensors,
                                           static_cast<YDataType*>(y_buf.GetDeviceBuffer())));
 

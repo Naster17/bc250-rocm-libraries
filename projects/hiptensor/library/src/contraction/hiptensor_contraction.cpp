@@ -28,6 +28,7 @@
 
 #include <hiptensor/hiptensor.h>
 
+#include "contraction_scalar.hpp"
 #include "contraction_selection.hpp"
 #include "contraction_solution.hpp"
 #include "contraction_solution_instances.hpp"
@@ -122,6 +123,10 @@ hiptensorStatus_t contractionGetWorkspaceSize(const hiptensorHandle_t           
     }
 
     *workspaceSize = 0u;
+    if(handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013)
+    {
+        return hiptensor::validateScalarContraction(desc);
+    }
 
     for(auto* candidate : planPref->mCandidates)
     {
@@ -203,7 +208,15 @@ hiptensorStatus_t hiptensorCreateContraction(const hiptensorHandle_t            
         return checkResult;
     }
 
-    if(!handle->getDevice().matrixCoreSupport(descCompute))
+    bool scalar = handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013;
+    if(scalar)
+    {
+        if(descCompute != HIPTENSOR_COMPUTE_DESC_32F && descCompute != HIPTENSOR_COMPUTE_DESC_64F)
+            return HIPTENSOR_STATUS_NOT_SUPPORTED;
+        if(descCompute == HIPTENSOR_COMPUTE_DESC_64F && !handle->getDevice().supportsF64())
+            return HIPTENSOR_STATUS_ARCH_MISMATCH;
+    }
+    else if(!handle->getDevice().matrixCoreSupport(descCompute))
     {
         return HIPTENSOR_STATUS_ARCH_MISMATCH;
     }
@@ -219,7 +232,7 @@ hiptensorStatus_t hiptensorCreateContraction(const hiptensorHandle_t            
     int                  nModeD = descD->mLengths.size();
     std::vector<int32_t> modeDV(modeD, modeD + nModeD);
 
-    if(int32_t sharedMode; hasSharedBatchMode(modeAV, modeBV, modeDV, sharedMode))
+    if(int32_t sharedMode; !scalar && hasSharedBatchMode(modeAV, modeBV, modeDV, sharedMode))
     {
         snprintf(msg,
                  sizeof(msg),
@@ -274,6 +287,16 @@ hiptensorStatus_t hiptensorCreateContraction(const hiptensorHandle_t            
     (*desc)->mModeE = {};
 
     (*desc)->mDescCompute = descCompute;
+    if(scalar)
+    {
+        auto status = hiptensor::validateScalarContraction(*desc);
+        if(status != HIPTENSOR_STATUS_SUCCESS)
+        {
+            delete *desc;
+            *desc = nullptr;
+        }
+        return status;
+    }
     return HIPTENSOR_STATUS_SUCCESS;
 }
 
@@ -291,6 +314,17 @@ hiptensorStatus_t hiptensorContract(const hiptensorHandle_t handle,
 {
     using hiptensor::Logger;
     auto& logger = Logger::instance();
+
+    // Scalar plans do not enter the CK solver/autotune registry.
+    if(handle && plan && handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013)
+    {
+        hiptensor::HipDevice currentDevice;
+        if(currentDevice.getDeviceId() != handle->getDevice().getDeviceId())
+            return HIPTENSOR_STATUS_ARCH_MISMATCH;
+        if(!plan->mOpDesc || plan->mOpDesc->mOperationType != HIPTENSOR_CONTRACTION)
+            return HIPTENSOR_STATUS_INVALID_VALUE;
+        return hiptensor::executeScalarContraction(plan->mOpDesc, alpha, A, B, beta, C, D, stream);
+    }
 
     using hiptensor::PlancacheAutotuneMgr;
     auto& autotuneMgr = PlancacheAutotuneMgr::instance();
@@ -607,6 +641,20 @@ hiptensorStatus_t contractionInitPlan(const hiptensorHandle_t              handl
                  hiptensorGetErrorString(errorCode));
         logger->logError("contractionInitPlan", msg);
         return HIPTENSOR_STATUS_ARCH_MISMATCH;
+    }
+
+    if(handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013)
+    {
+        auto status = hiptensor::validateScalarContraction(desc);
+        if(status == HIPTENSOR_STATUS_SUCCESS)
+        {
+            plan->mRequiredWorkspace = 0;
+            plan->mOpDesc            = desc;
+            plan->mPref              = pref;
+            pref->mCandidates.clear();
+            pref->mSolution = nullptr;
+        }
+        return status;
     }
 
     // At this point, we need to format inputs for kernels as they will be tested via selection model.

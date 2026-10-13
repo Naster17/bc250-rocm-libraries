@@ -26,6 +26,7 @@
 
 set(HIPTENSOR_CONTRACTION_SOURCES
    ${CMAKE_CURRENT_SOURCE_DIR}/hiptensor_contraction.cpp
+   ${CMAKE_CURRENT_SOURCE_DIR}/contraction_scalar.cpp
    ${CMAKE_CURRENT_SOURCE_DIR}/contraction_cpu_reference.cpp
    ${CMAKE_CURRENT_SOURCE_DIR}/contraction_selection.cpp
    ${CMAKE_CURRENT_SOURCE_DIR}/contraction_solution_instances.cpp

@@ -65,6 +65,7 @@ option(HIPSPARSELT_BUILD_TESTING "Build test client." ON)
 option(HIPSPARSELT_BUILD_COVERAGE "Build tests with coverage enabled." OFF)
 
 option(HIPSPARSELT_ENABLE_DEVICE "Build hipSPARSELt device libraries." ON)
+option(HIPSPARSELT_GFX1013_SCALAR_ONLY "Build the native gfx1013 scalar sparse backend." OFF)
 set(TENSILELITE_LIBLOGIC_PATH
     "${CMAKE_CURRENT_SOURCE_DIR}/library/src/hcc_detail/rocsparselt/src/spmm/Tensile/Logic/asm_full"
     CACHE PATH "Path to the hipSPARSELt TensileLite logic files."
@@ -102,6 +103,14 @@ if(NOT HIPSPARSELT_ENABLE_CUDA)
         hipsparselt_validate_gpu_targets("${GPU_TARGETS}")
     endif()
     message(STATUS "Building for GPU targets: ${GPU_TARGETS}")
+endif()
+
+if(HIPSPARSELT_GFX1013_SCALAR_ONLY)
+    if(NOT HIPSPARSELT_ENABLE_HIP OR NOT GPU_TARGETS STREQUAL "gfx1013")
+        message(FATAL_ERROR "The scalar backend requires HIP and GPU_TARGETS=gfx1013")
+    endif()
+    enable_language(HIP)
+    set(CMAKE_HIP_ARCHITECTURES gfx1013)
 endif()
 
 if(HIPSPARSELT_ENABLE_FORTRAN AND HIPSPARSELT_ENABLE_ASAN)
@@ -155,7 +164,7 @@ if(HIPSPARSELT_ENABLE_CUDA)
     message(STATUS "Found cusparseLt: ${cusparselt_LIBRARY}")
 endif()
 
-if(HIPSPARSELT_ENABLE_HIP)
+if(HIPSPARSELT_ENABLE_HIP AND NOT HIPSPARSELT_GFX1013_SCALAR_ONLY)
     if(NOT HIPBLASLT_TENSILELITE_PATH)
         set(HIPBLASLT_TENSILELITE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../hipblaslt/tensilelite")
     endif()
@@ -233,7 +242,7 @@ set(BUILD_SHARED_LIBS "${HIPSPARSELT_BUILD_SHARED_LIBS}")
 add_subdirectory(library)
 
 set(_hipsparselt_requires_hipblaslt OFF)
-if(HIPSPARSELT_ENABLE_HIP
+if(HIPSPARSELT_ENABLE_HIP AND NOT HIPSPARSELT_GFX1013_SCALAR_ONLY
         AND (HIPSPARSELT_ENABLE_THEROCK OR NOT BUILD_SHARED_LIBS))
     set(_hipsparselt_requires_hipblaslt ON)
 endif()

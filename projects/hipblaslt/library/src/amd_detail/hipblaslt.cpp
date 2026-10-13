@@ -31,6 +31,9 @@
 #include "handle.h"
 #include "hipblaslt/hipblaslt-ext-op.h"
 #include "hipblaslt_internal.hpp"
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+#include "gfx1013_scalar.hpp"
+#endif
 
 #include <hip/hip_runtime_api.h>
 #include <iostream>
@@ -1122,6 +1125,20 @@ hipblasStatus_t
 try
 {
     rocblaslt::Debug::Instance().markerStart("hipblasLtMatmulAlgoGetHeuristic");
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+    auto scalar_status = gfx1013_scalar::heuristic(handle,
+                                                   matmulDesc,
+                                                   Adesc,
+                                                   Bdesc,
+                                                   Cdesc,
+                                                   Ddesc,
+                                                   pref,
+                                                   requestedAlgoCount,
+                                                   heuristicResultsArray,
+                                                   returnAlgoCount);
+    rocblaslt::Debug::Instance().markerStop();
+    return scalar_status;
+#endif
 
 #if HIPBLASLT_HAS_GEMM_A2A_FUSION
     // Everything a communicating stage can be judged on before a solution exists
@@ -1174,6 +1191,26 @@ hipblasStatus_t hipblasLtMatmul(hipblasLtHandle_t            handle,
 try
 {
     rocblaslt::Debug::Instance().markerStart("hipblasLtMatmul");
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+    auto scalar_status = gfx1013_scalar::matmul(handle,
+                                                matmul_descr,
+                                                alpha,
+                                                A,
+                                                matA,
+                                                B,
+                                                matB,
+                                                beta,
+                                                C,
+                                                matC,
+                                                D,
+                                                matD,
+                                                algo,
+                                                workspace,
+                                                workspaceSizeInBytes,
+                                                stream);
+    rocblaslt::Debug::Instance().markerStop();
+    return scalar_status;
+#endif
 #if HIPBLASLT_HOST_API_ONLY
     rocblaslt::Debug::Instance().markerStop();
     return HIPBLAS_STATUS_NOT_SUPPORTED;

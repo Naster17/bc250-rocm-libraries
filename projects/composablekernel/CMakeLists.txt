@@ -161,6 +161,9 @@ function(_ck_gpu_target_string_to_id TARGET_STR OUT_VAR)
         set(${OUT_VAR} "0x0942" PARENT_SCOPE)
     elseif(_tgt STREQUAL "gfx950")
         set(${OUT_VAR} "0x0950" PARENT_SCOPE)
+    # GFX10.1
+    elseif(_tgt STREQUAL "gfx1013")
+        set(${OUT_VAR} "0x1013" PARENT_SCOPE)
     # GFX10.3
     elseif(_tgt STREQUAL "gfx1030")
         set(${OUT_VAR} "0x1030" PARENT_SCOPE)

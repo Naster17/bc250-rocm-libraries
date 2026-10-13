@@ -67,7 +67,9 @@ if(HIPSPARSELT_ENABLE_CUDA)
 endif()
 
 if(HIPSPARSELT_ENABLE_HIP)
-    target_compile_definitions(hipsparselt PRIVATE BUILD_WITH_TENSILE)
+    if(NOT HIPSPARSELT_GFX1013_SCALAR_ONLY)
+        target_compile_definitions(hipsparselt PRIVATE BUILD_WITH_TENSILE)
+    endif()
     target_compile_definitions(hipsparselt PRIVATE __HIP_HCC_COMPAT_MODE__=1)
     target_include_directories(
         hipsparselt PUBLIC $<BUILD_INTERFACE:${HIP_INCLUDE_DIRS}> # Needed?

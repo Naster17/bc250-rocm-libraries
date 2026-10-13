@@ -1,0 +1,318 @@
+/*******************************************************************************
+ *
+ * MIT License
+ *
+ * Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ *
+ *******************************************************************************/
+#include "contraction_scalar.hpp"
+
+#include <algorithm>
+#include <hip/hip_runtime.h>
+#include <limits>
+#include <map>
+#include <set>
+
+namespace hiptensor
+{
+    namespace
+    {
+        constexpr int MaxModes = 16;
+        struct ScalarProblem
+        {
+            int                 freeModes          = 0;
+            int                 sumModes           = 0;
+            uint64_t            outputElements     = 1;
+            uint64_t            sumElements        = 1;
+            uint64_t            lengths[MaxModes]  = {};
+            uint64_t            aStrides[MaxModes] = {};
+            uint64_t            bStrides[MaxModes] = {};
+            uint64_t            cStrides[MaxModes] = {};
+            uint64_t            dStrides[MaxModes] = {};
+            hiptensorOperator_t opA, opB, opC;
+        };
+
+        bool checkedMultiply(uint64_t& value, uint64_t factor)
+        {
+            if(factor == 0 || value > std::numeric_limits<uint64_t>::max() / factor)
+                return false;
+            value *= factor;
+            return true;
+        }
+
+        bool supportedOp(hiptensorOperator_t op)
+        {
+            return op == HIPTENSOR_OP_IDENTITY || op == HIPTENSOR_OP_NEG || op == HIPTENSOR_OP_ABS
+                   || op == HIPTENSOR_OP_RELU;
+        }
+
+        hiptensorStatus_t makeProblem(hiptensorOperationDescriptor_t desc, ScalarProblem& problem)
+        {
+            if(!desc || desc->mOperationType != HIPTENSOR_CONTRACTION || !desc->mDescA
+               || !desc->mDescB || !desc->mDescD)
+                return HIPTENSOR_STATUS_INVALID_VALUE;
+            if(!supportedOp(desc->mOpA) || !supportedOp(desc->mOpB)
+               || (desc->mDescC && !supportedOp(desc->mOpC)))
+                return HIPTENSOR_STATUS_NOT_SUPPORTED;
+
+            auto type = desc->mDescD->mType;
+            bool fp32
+                = (type == HIPTENSOR_R_16F || type == HIPTENSOR_R_16BF || type == HIPTENSOR_R_32F)
+                  && desc->mDescCompute == HIPTENSOR_COMPUTE_DESC_32F;
+            bool fp64 = type == HIPTENSOR_R_64F && desc->mDescCompute == HIPTENSOR_COMPUTE_DESC_64F;
+            if((!fp32 && !fp64) || desc->mDescA->mType != type || desc->mDescB->mType != type
+               || (desc->mDescC && desc->mDescC->mType != type))
+                return HIPTENSOR_STATUS_NOT_SUPPORTED;
+
+            std::map<int32_t, uint64_t> lengths;
+            auto                        collect = [&](hiptensorTensorDescriptor_t tensor,
+                                                      std::vector<int32_t> const& modes) {
+                if(!tensor)
+                    return modes.empty();
+                if(modes.size() != tensor->mLengths.size()
+                   || modes.size() != tensor->mStrides.size() || modes.size() > MaxModes)
+                    return false;
+                std::set<int32_t> unique;
+                uint64_t          extent = 1;
+                for(size_t i = 0; i < modes.size(); ++i)
+                {
+                    uint64_t len = tensor->mLengths[i], stride = tensor->mStrides[i];
+                    if(len == 0 || stride == 0 || len > std::numeric_limits<int64_t>::max()
+                       || stride > std::numeric_limits<int64_t>::max()
+                       || !unique.insert(modes[i]).second)
+                        return false;
+                    auto inserted = lengths.emplace(modes[i], len);
+                    if(!inserted.second && inserted.first->second != len)
+                        return false;
+                    if(len - 1 > (std::numeric_limits<uint64_t>::max() - extent) / stride)
+                        return false;
+                    extent += (len - 1) * stride;
+                }
+                return extent <= std::numeric_limits<int64_t>::max() / hiptensorDataTypeSize(type);
+            };
+            if(!collect(desc->mDescA, desc->mModeA) || !collect(desc->mDescB, desc->mModeB)
+               || !collect(desc->mDescC, desc->mModeC) || !collect(desc->mDescD, desc->mModeD))
+                return HIPTENSOR_STATUS_INVALID_VALUE;
+            if(lengths.size() > MaxModes)
+                return HIPTENSOR_STATUS_NOT_SUPPORTED;
+
+            // Each non-output mode must belong to both multiplicands. Output modes may
+            // be shared (batch), or occur in either multiplicand (free/outer product).
+            auto contains = [](std::vector<int32_t> const& modes, int32_t mode) {
+                return std::find(modes.begin(), modes.end(), mode) != modes.end();
+            };
+            std::vector<int32_t> ordered = desc->mModeD;
+            for(auto const& item : lengths)
+            {
+                bool a = contains(desc->mModeA, item.first);
+                bool b = contains(desc->mModeB, item.first);
+                bool d = contains(desc->mModeD, item.first);
+                if((d && !a && !b) || (!d && (!a || !b)))
+                    return HIPTENSOR_STATUS_NOT_SUPPORTED;
+                if(!d)
+                    ordered.push_back(item.first);
+            }
+            if(desc->mDescC
+               && (desc->mModeC.size() != desc->mModeD.size()
+                   || std::set<int32_t>(desc->mModeC.begin(), desc->mModeC.end())
+                          != std::set<int32_t>(desc->mModeD.begin(), desc->mModeD.end())))
+                return HIPTENSOR_STATUS_NOT_SUPPORTED;
+
+            // Ensure distinct output elements never race. This admits padded and
+            // transposed layouts; interleaved exotic strides are conservatively rejected.
+            std::vector<std::pair<uint64_t, uint64_t>> outputDimensions;
+            for(size_t i = 0; i < desc->mModeD.size(); ++i)
+                if(desc->mDescD->mLengths[i] > 1)
+                    outputDimensions.emplace_back(desc->mDescD->mStrides[i],
+                                                  desc->mDescD->mLengths[i]);
+            std::sort(outputDimensions.begin(), outputDimensions.end());
+            uint64_t span = 1;
+            for(auto dimension : outputDimensions)
+            {
+                if(dimension.first < span)
+                    return HIPTENSOR_STATUS_NOT_SUPPORTED;
+                span += (dimension.second - 1) * dimension.first;
+            }
+
+            problem.freeModes = desc->mModeD.size();
+            problem.sumModes  = ordered.size() - problem.freeModes;
+            problem.opA       = desc->mOpA;
+            problem.opB       = desc->mOpB;
+            problem.opC       = desc->mOpC;
+            auto stride       = [](hiptensorTensorDescriptor_t tensor,
+                                   std::vector<int32_t> const& modes,
+                                   int32_t                     mode) -> uint64_t {
+                auto pos = std::find(modes.begin(), modes.end(), mode);
+                return !tensor || pos == modes.end() ? 0 : tensor->mStrides[pos - modes.begin()];
+            };
+            for(size_t i = 0; i < ordered.size(); ++i)
+            {
+                problem.lengths[i]  = lengths.at(ordered[i]);
+                problem.aStrides[i] = stride(desc->mDescA, desc->mModeA, ordered[i]);
+                problem.bStrides[i] = stride(desc->mDescB, desc->mModeB, ordered[i]);
+                problem.cStrides[i] = stride(desc->mDescC, desc->mModeC, ordered[i]);
+                problem.dStrides[i] = stride(desc->mDescD, desc->mModeD, ordered[i]);
+                if(!checkedMultiply(i < static_cast<size_t>(problem.freeModes)
+                                        ? problem.outputElements
+                                        : problem.sumElements,
+                                    problem.lengths[i]))
+                    return HIPTENSOR_STATUS_INVALID_VALUE;
+            }
+            return HIPTENSOR_STATUS_SUCCESS;
+        }
+
+        template <class Acc>
+        __device__ Acc unary(Acc value, hiptensorOperator_t op)
+        {
+            if(op == HIPTENSOR_OP_NEG)
+                return -value;
+            if(op == HIPTENSOR_OP_ABS)
+                return value == Acc(0) ? Acc(0) : (value < Acc(0) ? -value : value);
+            if(op == HIPTENSOR_OP_RELU)
+                return value < Acc(0) ? Acc(0) : value;
+            return value;
+        }
+
+        template <class T, class Acc>
+        __global__ void scalarContraction(
+            ScalarProblem p, Acc alpha, const T* a, const T* b, Acc beta, const T* c, T* d)
+        {
+            for(uint64_t out = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+                out < p.outputElements;
+                out += uint64_t(gridDim.x) * blockDim.x)
+            {
+                uint64_t linear = out, aBase = 0, bBase = 0, cOffset = 0, dOffset = 0;
+                for(int i = 0; i < p.freeModes; ++i)
+                {
+                    uint64_t coordinate = linear % p.lengths[i];
+                    linear /= p.lengths[i];
+                    aBase += coordinate * p.aStrides[i];
+                    bBase += coordinate * p.bStrides[i];
+                    cOffset += coordinate * p.cStrides[i];
+                    dOffset += coordinate * p.dStrides[i];
+                }
+                Acc sum = 0;
+                if(alpha != Acc(0))
+                    for(uint64_t k = 0; k < p.sumElements; ++k)
+                    {
+                        uint64_t contracted = k, aOffset = aBase, bOffset = bBase;
+                        for(int i = p.freeModes; i < p.freeModes + p.sumModes; ++i)
+                        {
+                            uint64_t coordinate = contracted % p.lengths[i];
+                            contracted /= p.lengths[i];
+                            aOffset += coordinate * p.aStrides[i];
+                            bOffset += coordinate * p.bStrides[i];
+                        }
+                        sum += unary(Acc(a[aOffset]), p.opA) * unary(Acc(b[bOffset]), p.opB);
+                    }
+                Acc value = alpha * sum;
+                if(beta != Acc(0))
+                    value += beta * unary(Acc(c[cOffset]), p.opC);
+                d[dOffset] = T(value);
+            }
+        }
+
+        template <class T, class Acc>
+        hiptensorStatus_t launch(ScalarProblem const& problem,
+                                 const void*          alpha,
+                                 const void*          a,
+                                 const void*          b,
+                                 const void*          beta,
+                                 const void*          c,
+                                 void*                d,
+                                 hipStream_t          stream)
+        {
+            Acc alphaValue = *static_cast<const Acc*>(alpha);
+            Acc betaValue  = beta ? *static_cast<const Acc*>(beta) : Acc(0);
+            if(betaValue != Acc(0) && !c)
+                return HIPTENSOR_STATUS_INVALID_VALUE;
+            uint32_t blocks = std::min<uint64_t>(65535, 1 + (problem.outputElements - 1) / 256);
+            hipLaunchKernelGGL((scalarContraction<T, Acc>),
+                               dim3(blocks),
+                               dim3(256),
+                               0,
+                               stream,
+                               problem,
+                               alphaValue,
+                               static_cast<const T*>(a),
+                               static_cast<const T*>(b),
+                               betaValue,
+                               static_cast<const T*>(c),
+                               static_cast<T*>(d));
+            return hipGetLastError() == hipSuccess ? HIPTENSOR_STATUS_SUCCESS
+                                                   : HIPTENSOR_STATUS_EXECUTION_FAILED;
+        }
+    }
+
+    hiptensorStatus_t validateScalarContraction(hiptensorOperationDescriptor_t desc)
+    {
+        ScalarProblem problem;
+        return makeProblem(desc, problem);
+    }
+
+    hiptensorStatus_t executeScalarContraction(hiptensorOperationDescriptor_t desc,
+                                               const void*                    alpha,
+                                               const void*                    a,
+                                               const void*                    b,
+                                               const void*                    beta,
+                                               const void*                    c,
+                                               void*                          d,
+                                               hipStream_t                    stream)
+    {
+        ScalarProblem problem;
+        auto          status = makeProblem(desc, problem);
+        if(status != HIPTENSOR_STATUS_SUCCESS)
+            return status;
+        if(!alpha || !a || !b || !d || (desc->mDescC && !beta) || (!desc->mDescC && c))
+            return HIPTENSOR_STATUS_INVALID_VALUE;
+        auto extent = [](hiptensorTensorDescriptor_t tensor) {
+            uint64_t span = 1;
+            for(size_t i = 0; i < tensor->mLengths.size(); ++i)
+                span += (tensor->mLengths[i] - 1) * tensor->mStrides[i];
+            return span * hiptensorDataTypeSize(tensor->mType);
+        };
+        auto overlaps = [](const void* lhs, uint64_t lhsBytes, const void* rhs, uint64_t rhsBytes) {
+            auto x = reinterpret_cast<uintptr_t>(lhs), y = reinterpret_cast<uintptr_t>(rhs);
+            return x < y ? y - x < lhsBytes : x - y < rhsBytes;
+        };
+        auto outputBytes = extent(desc->mDescD);
+        if(overlaps(d, outputBytes, a, extent(desc->mDescA))
+           || overlaps(d, outputBytes, b, extent(desc->mDescB)))
+            return HIPTENSOR_STATUS_NOT_SUPPORTED;
+        if(c && overlaps(d, outputBytes, c, extent(desc->mDescC))
+           && (d != c || desc->mModeC != desc->mModeD
+               || desc->mDescC->mStrides != desc->mDescD->mStrides))
+            return HIPTENSOR_STATUS_NOT_SUPPORTED;
+        switch(desc->mDescD->mType)
+        {
+        case HIPTENSOR_R_16F:
+            return launch<__half, float>(problem, alpha, a, b, beta, c, d, stream);
+        case HIPTENSOR_R_16BF:
+            return launch<hip_bfloat16, float>(problem, alpha, a, b, beta, c, d, stream);
+        case HIPTENSOR_R_32F:
+            return launch<float, float>(problem, alpha, a, b, beta, c, d, stream);
+        case HIPTENSOR_R_64F:
+            return launch<double, double>(problem, alpha, a, b, beta, c, d, stream);
+        default:
+            return HIPTENSOR_STATUS_NOT_SUPPORTED;
+        }
+    }
+}

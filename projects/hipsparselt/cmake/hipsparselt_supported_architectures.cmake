@@ -28,6 +28,9 @@ endif()
 # unsupported target is found.
 function(hipsparselt_validate_gpu_targets targets)
     set(supported_list ${SUPPORTED_ARCHITECTURES})
+    if(HIPSPARSELT_GFX1013_SCALAR_ONLY)
+        list(APPEND supported_list gfx1013)
+    endif()
     set(target_list ${targets})
 
     string(REGEX REPLACE ";" " " supported_flat "${supported_list}")

@@ -61,6 +61,7 @@ option(HIPBLASLT_ENABLE_MATRIX_TRANSFORM "Build hipBLASLt MatrixTransform device
 option(HIPBLASLT_ENABLE_CLIENT "Build hipBLASLt client apps." ON)
 option(HIPBLASLT_ENABLE_HOST "Build hipBLASLt host library." ON)
 option(HIPBLASLT_HOST_API_ONLY "Build host descriptor APIs without a GEMM backend." OFF)
+option(HIPBLASLT_ENABLE_GFX1013_SCALAR "Build the native gfx1013 scalar GEMM backend." OFF)
 option(HIPBLASLT_BUILD_SHARED_LIBS "Build the hipBLASLt library as shared vs static." ON)
 option(TENSILELITE_BUILD_SHARED_LIBS "Build the TensileLite host library as shared vs static." ON)
 option(HIPBLASLT_ENABLE_FETCH "Fetch dependencies using fetch content" OFF)
@@ -133,6 +134,12 @@ mark_as_advanced(HIPBLASLT_ENABLE_COVERAGE)
 mark_as_advanced(TENSILELITE_ENABLE_AUTOBUILD)
 
 set(GPU_TARGETS "" CACHE STRING "AMD GFX targets to cross-compile")
+
+if(HIPBLASLT_ENABLE_GFX1013_SCALAR)
+    if(NOT HIPBLASLT_HOST_API_ONLY OR NOT GPU_TARGETS STREQUAL "gfx1013")
+        message(FATAL_ERROR "HIPBLASLT_ENABLE_GFX1013_SCALAR requires HOST_API_ONLY and GPU_TARGETS=gfx1013")
+    endif()
+endif()
 
 if(HIPBLASLT_HOST_API_ONLY)
     if(NOT HIPBLASLT_ENABLE_HOST OR HIPBLASLT_ENABLE_DEVICE OR HIPBLASLT_ENABLE_ROCROLLER
@@ -397,7 +404,8 @@ set(BUILD_SHARED_LIBS "${HIPBLASLT_BUILD_SHARED_LIBS}")
 if(HIPBLASLT_ENABLE_HOST)
     add_library(hipblaslt)
     target_compile_definitions(hipblaslt PRIVATE
-        HIPBLASLT_HOST_API_ONLY=$<BOOL:${HIPBLASLT_HOST_API_ONLY}>)
+        HIPBLASLT_HOST_API_ONLY=$<BOOL:${HIPBLASLT_HOST_API_ONLY}>
+        HIPBLASLT_ENABLE_GFX1013_SCALAR=$<BOOL:${HIPBLASLT_ENABLE_GFX1013_SCALAR}>)
     if(WIN32 AND BUILD_SHARED_LIBS AND _hipblaslt_have_version_rc)
         target_sources(
             hipblaslt

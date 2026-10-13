@@ -28,6 +28,9 @@ struct ReduceKernel
     static constexpr index_t kBlockSize = Problem::BlockShape::BlockSize;
     CK_TILE_HOST static constexpr auto BlockSize()
     {
+        if constexpr(core::arch::getCMakeCompilerTarget().TARGET_ID ==
+                     core::arch::amdgcn_target_id::GFX1013)
+            return kBlockSize; // The configured shape already uses native wave32.
         return is_wave32() ? kBlockSize / 2 : kBlockSize;
     }
 

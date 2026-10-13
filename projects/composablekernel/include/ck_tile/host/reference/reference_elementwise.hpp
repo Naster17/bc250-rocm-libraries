@@ -15,12 +15,21 @@ CK_TILE_HOST void reference_unary_elementwise(const HostTensor<ADataType>& a,
 {
     // TODO: imeplement gpu version reference function
     auto f = [&](auto i) {
-        auto v_a   = type_convert<ComputeDataType>(a.mData[i]);
-        auto v_b   = element_op(v_a);
-        b.mData[i] = ck_tile::type_convert<BDataType>(v_b);
+        // Iterate logical coordinates: allocation padding is not a tensor element.
+        std::size_t linear = i, a_offset = 0, b_offset = 0;
+        for(std::size_t dim = b.get_num_of_dimension(); dim-- > 0;)
+        {
+            auto coordinate = linear % b.get_length(dim);
+            linear /= b.get_length(dim);
+            a_offset += coordinate * a.get_stride(dim);
+            b_offset += coordinate * b.get_stride(dim);
+        }
+        auto v_a          = type_convert<ComputeDataType>(a.mData[a_offset]);
+        auto v_b          = element_op(v_a);
+        b.mData[b_offset] = ck_tile::type_convert<BDataType>(v_b);
     };
 
-    make_ParallelTensorFunctor(f, b.get_element_space_size())(std::thread::hardware_concurrency());
+    make_ParallelTensorFunctor(f, b.get_element_size())(std::thread::hardware_concurrency());
 }
 
 template <typename ADataType,
