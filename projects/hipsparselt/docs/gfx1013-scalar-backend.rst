@@ -13,6 +13,7 @@ Implemented operations
 * FP32 compute with matching FP32, FP16, or BF16 matrix input/output types.
 * One structured operand, either A or B; row/column storage and real transpose.
 * Strip magnitude pruning and prune checking, including in-place strip pruning.
+* FP16/BF16 maximum-L1 4x4 TILE pruning with two selected entries per row and column.
 * Compression and compressed scalar GEMM, through both descriptor and plan APIs.
 * Positive, equal batch counts with explicit nonoverlapping padded batch strides.
 * Host ``float`` alpha/beta, arbitrary valid leading dimensions, separate C/D
@@ -22,7 +23,7 @@ Implemented operations
   stream completes, without changing its configuration. Only one search
   iteration is accepted. Matmul remains asynchronous.
 
-The fallback rejects tile pruning, integer/FP8/TF32 compute modes, mixed matrix
+The fallback rejects FP32 tile pruning, integer/FP8/TF32 compute modes, mixed matrix
 storage types, bias/activation/vector scaling, split-K, multiple streams, batch
 broadcasting, multiple search iterations, and sparse/sparse multiplication. It does not silently ignore
 unsupported attributes. Descriptors use bounded positive dimensions to keep
@@ -50,7 +51,7 @@ Qualification
 API against independent CPU magnitude pruning and double-precision dense GEMM,
 independently decodes compressed values/metadata, destroys the original sparse
 storage before GEMM, checks padding/buffer guards, and detects invalid sparsity.
-Its 96 cases combine three types, A/B sparsity, two layouts, four transpose
-pairs, and one/two batches. GPU execution must be recorded separately from
+Its 162 cases cover strip/TILE pruning, independent mask enumeration, partial
+tiles, types, A/B sparsity, layouts, transposes and batches. GPU execution must be recorded separately from
 host/device compilation; passing syntax checks alone does not qualify runtime
 support.

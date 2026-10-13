@@ -214,5 +214,9 @@ int main(int argc, char* argv[])
         }
     }
 
+    if(data_type == "bf16" && use_model_sensitive_rmsnorm == 0)
+        return run<ck_tile::bf16_t, 0>(arg_parser) ? 0 : -2;
+    if(data_type == "fp32" && use_model_sensitive_rmsnorm == 0)
+        return run<float, 0>(arg_parser) ? 0 : -2;
     return -3;
 }

@@ -25,6 +25,8 @@ Supported operations
   not read A or B. K=0 scales C without reading A or B.
 * Explicit heuristic algorithms or a null algorithm for implicit selection.
   The scalar kernel needs no workspace and executes on the supplied HIP stream.
+* Bias, ReLU, GELU and their bias combinations. Bias follows logical output rows;
+  output-type or FP32 bias supports broadcast or padded batch strides.
 
 Limitations
 -----------
@@ -33,7 +35,7 @@ This is a correctness-oriented scalar FMA implementation using 16x16 shared
 memory tiles. It does not claim performance parity with optimized BLAS kernels.
 Matrix instructions are not emitted because gfx1013 has neither MFMA nor WMMA.
 
-Epilogues, bias, scaling pointers, auxiliary outputs, FP8/INT8/FP64, pointer-array
+Auxiliary/backward epilogues, scaling pointers, auxiliary outputs, FP8/INT8/FP64, pointer-array
 batches, packed layouts, C leading-dimension-zero broadcasting, grouped GEMM
 and C++ extension algorithm enumeration are unsupported. Non-default SM-count,
 Stream-K and search/configuration controls are rejected rather than ignored.

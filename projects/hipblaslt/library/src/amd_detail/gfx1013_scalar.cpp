@@ -18,6 +18,18 @@ namespace gfx1013_scalar
         constexpr uint8_t  algorithm_id[16]
             = {'g', 'f', 'x', '1', '0', '1', '3', 's', 'c', 'a', 'l', 'a', 'r', 1, 0, 0};
 
+        bool uses_bias(rocblaslt_epilogue epilogue)
+        {
+            return epilogue == ROCBLASLT_EPILOGUE_BIAS || epilogue == ROCBLASLT_EPILOGUE_RELU_BIAS
+                   || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS;
+        }
+
+        bool supported_epilogue(rocblaslt_epilogue epilogue)
+        {
+            return epilogue == ROCBLASLT_EPILOGUE_DEFAULT || uses_bias(epilogue)
+                   || epilogue == ROCBLASLT_EPILOGUE_RELU || epilogue == ROCBLASLT_EPILOGUE_GELU;
+        }
+
         struct Layout
         {
             uint64_t            rows, cols, ld, stride, offset;
@@ -76,14 +88,14 @@ namespace gfx1013_scalar
             if(device != h->device || std::strncmp(h->properties.gcnArchName, "gfx1013", 7)
                || (h->properties.gcnArchName[7] && h->properties.gcnArchName[7] != ':'))
                 return HIPBLAS_STATUS_ARCH_MISMATCH;
-            if(op->epilogue != ROCBLASLT_EPILOGUE_DEFAULT || op->bias || op->scaleA || op->scaleB
-               || op->scaleC || op->scaleD || op->scaleE || op->amaxD || op->e
-               || op->scaleAType != RocblasltContractionProblem::ScalingFormat::None
+            if(!supported_epilogue(op->epilogue) || (!uses_bias(op->epilogue) && op->bias)
+               || op->scaleA || op->scaleB || op->scaleC || op->scaleD || op->scaleE || op->amaxD
+               || op->e || op->scaleAType != RocblasltContractionProblem::ScalingFormat::None
                || op->scaleBType != RocblasltContractionProblem::ScalingFormat::None
                || op->compute_input_typeA != HIPBLASLT_DATATYPE_INVALID
                || op->compute_input_typeB != HIPBLASLT_DATATYPE_INVALID
                || op->scale_type != HIP_R_32F || op->sm_count_target || h->sm_count_target
-               || op->streamk_tile_scheduling_ext || op->bias_stride
+               || op->streamk_tile_scheduling_ext
                || h->check_numerics != hipblaslt_check_numerics_mode_no_check
                || (op->compute_type_original != rocblaslt_compute_f32
                    && op->compute_type_original != rocblaslt_compute_f32_pedantic)
@@ -100,6 +112,18 @@ namespace gfx1013_scalar
             if(a->type != b->type || c->type != d->type
                || (a->type != HIP_R_32F && a->type != HIP_R_16F && a->type != HIP_R_16BF)
                || (d->type != a->type && d->type != HIP_R_32F))
+                return HIPBLAS_STATUS_NOT_SUPPORTED;
+            if(uses_bias(op->epilogue))
+            {
+                if(!op->bias || op->bias_stride < 0
+                   || (op->bias_stride && uint64_t(op->bias_stride) < d->m))
+                    return HIPBLAS_STATUS_INVALID_VALUE;
+                const auto bias_type
+                    = op->bias_type == HIPBLASLT_DATATYPE_INVALID ? d->type : op->bias_type;
+                if(bias_type != d->type && bias_type != HIP_R_32F)
+                    return HIPBLAS_STATUS_NOT_SUPPORTED;
+            }
+            else if(op->bias_stride)
                 return HIPBLAS_STATUS_NOT_SUPPORTED;
             for(auto x : {a, b, c, d})
             {
@@ -124,21 +148,25 @@ namespace gfx1013_scalar
         }
 
         template <typename Input, typename Output>
-        __global__ void gemm(Layout        a,
-                             Layout        b,
-                             Layout        c,
-                             Layout        d,
-                             const Input*  A,
-                             const Input*  B,
-                             const Output* C,
-                             Output*       D,
-                             uint64_t      k,
-                             bool          trans_a,
-                             bool          trans_b,
-                             float         alpha_host,
-                             float         beta_host,
-                             const float*  alpha_device,
-                             const float*  beta_device)
+        __global__ void gemm(Layout             a,
+                             Layout             b,
+                             Layout             c,
+                             Layout             d,
+                             const Input*       A,
+                             const Input*       B,
+                             const Output*      C,
+                             Output*            D,
+                             uint64_t           k,
+                             bool               trans_a,
+                             bool               trans_b,
+                             float              alpha_host,
+                             float              beta_host,
+                             const float*       alpha_device,
+                             const float*       beta_device,
+                             const void*        bias,
+                             hipDataType        bias_type,
+                             uint64_t           bias_stride,
+                             rocblaslt_epilogue epilogue)
         {
             __shared__ float left[tile][tile];
             __shared__ float right[tile][tile];
@@ -173,8 +201,30 @@ namespace gfx1013_scalar
             if(row < d.rows && col < d.cols)
             {
                 // BLAS beta=0 must not read C: uninitialised/NaN C is valid in this case.
-                const float value_c         = beta == 0 ? 0 : float(C[c.index(row, col, batch)]);
-                D[d.index(row, col, batch)] = Output(__builtin_fmaf(alpha, acc, beta * value_c));
+                const float value_c = beta == 0 ? 0 : float(C[c.index(row, col, batch)]);
+                float       value   = __builtin_fmaf(alpha, acc, beta * value_c);
+                if(bias)
+                {
+                    // Bias is indexed by logical D row, independent of storage order.
+                    const uint64_t index = batch * bias_stride + row;
+                    if(bias_type == HIP_R_32F)
+                        value += static_cast<const float*>(bias)[index];
+                    else if(bias_type == HIP_R_16F)
+                        value += float(static_cast<const __half*>(bias)[index]);
+                    else
+                        value += float(static_cast<const hip_bfloat16*>(bias)[index]);
+                }
+                if(epilogue == ROCBLASLT_EPILOGUE_RELU || epilogue == ROCBLASLT_EPILOGUE_RELU_BIAS)
+                    value = fmaxf(value, 0.0f);
+                else if(epilogue == ROCBLASLT_EPILOGUE_GELU
+                        || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS)
+                {
+                    // Match the tanh approximation used by upstream activation kernels.
+                    const float inner
+                        = 0.7978845608028654f * value * (1.0f + 0.044715f * value * value);
+                    value = 0.5f * value * (1.0f + tanhf(inner));
+                }
+                D[d.index(row, col, batch)] = Output(value);
             }
         }
 
@@ -202,7 +252,7 @@ namespace gfx1013_scalar
             const uint64_t k = op->op_A == HIPBLAS_OP_N ? a->n : a->m;
             if(!D || ((device || bh != 0) && !C) || (k && (device || ah != 0) && (!A || !B)))
                 return HIPBLAS_STATUS_INVALID_VALUE;
-            if(D == A || D == B)
+            if(D == A || D == B || (op->bias && D == op->bias))
                 return HIPBLAS_STATUS_INVALID_VALUE;
             if(C == D
                && (c->ld != d->ld || c->batch_stride != d->batch_stride
@@ -227,7 +277,11 @@ namespace gfx1013_scalar
                 ah,
                 bh,
                 device ? static_cast<const float*>(alpha) : nullptr,
-                device ? static_cast<const float*>(beta) : nullptr);
+                device ? static_cast<const float*>(beta) : nullptr,
+                uses_bias(op->epilogue) ? op->bias : nullptr,
+                op->bias_type == HIPBLASLT_DATATYPE_INVALID ? d->type : op->bias_type,
+                uint64_t(op->bias_stride),
+                op->epilogue);
             return hipGetLastError() == hipSuccess ? HIPBLAS_STATUS_SUCCESS
                                                    : HIPBLAS_STATUS_EXECUTION_FAILED;
         }

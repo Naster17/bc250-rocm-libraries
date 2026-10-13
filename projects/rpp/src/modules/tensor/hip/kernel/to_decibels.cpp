@@ -51,6 +51,7 @@ __device__ __forceinline__ void to_decibels_hip_compute(d_float8* src_f8, d_floa
 // -------------------- Set 1 -  kernels for finding inverse magnitude value --------------------
 
 __global__ void inverse_magnitude_hip_tensor(float* srcPtr, int maxLength, bool computeMax,
+                                             float referenceMagnitude,
                                              float* inverseMagnitudeTensor)
 
 {
@@ -61,18 +62,9 @@ __global__ void inverse_magnitude_hip_tensor(float* srcPtr, int maxLength, bool 
     if (computeMax) {
         uint srcIdx = id_z * maxLength;
         __shared__ float max_smem[256];  // 256 values of src in a 256 x 1 thread block
-        max_smem[hipThreadIdx_x] =
-            srcPtr[srcIdx];  // initialization of LDS to start value using all 256 threads
-
-        if (id_x >= maxLength) return;
-
-        srcIdx += id_x;
-        float maxVal = srcPtr[srcIdx];
-        while (id_x < maxLength) {
-            maxVal = fmaxf(maxVal, srcPtr[srcIdx]);
-            id_x += hipBlockDim_x;
-            srcIdx += hipBlockDim_x;
-        }
+        float maxVal = -INFINITY;
+        for (int i = id_x; i < maxLength; i += hipBlockDim_x)
+            maxVal = fmaxf(maxVal, srcPtr[srcIdx + i]);
         max_smem[hipThreadIdx_x] = maxVal;
         __syncthreads();  // syncthreads after max compute
 
@@ -85,9 +77,10 @@ __global__ void inverse_magnitude_hip_tensor(float* srcPtr, int maxLength, bool 
         }
 
         // Final store to dst
-        if (hipThreadIdx_x == 0) inverseMagnitudeTensor[id_z] = 1.f / max_smem[0];
+        if (hipThreadIdx_x == 0)
+            inverseMagnitudeTensor[id_z] = max_smem[0] == 0 ? 1.f : 1.f / max_smem[0];
     } else {
-        inverseMagnitudeTensor[id_z] = 1.0f;
+        inverseMagnitudeTensor[id_z] = 1.f / referenceMagnitude;
     }
 }
 
@@ -99,15 +92,11 @@ __global__ void max_reduction_1d_hip_tensor(float* srcPtr, uint2 srcStridesNH,
     uint srcLength = srcDims[id_z].height;
     uint srcIdx = id_z * srcStridesNH.x;
     __shared__ float max_smem[256];  // 256 values of src in a 256 x 1 thread block
-    max_smem[hipThreadIdx_x] =
-        srcPtr[srcIdx];  // initialization of LDS to start value using all 256 threads
-
-    if (id_x >= srcLength) return;
-
-    srcIdx += id_x;
-    d_float8 src_f8;
-    rpp_hip_load8_and_unpack_to_float8(srcPtr + srcIdx, &src_f8);  // load 8 pixels to local memory
-    rpp_hip_math_max8(&src_f8, &max_smem[hipThreadIdx_x]);
+    float maxVal = -INFINITY;
+    // Do not include the final vector's padding in the reference magnitude.
+    for (int i = 0; i < 8; ++i)
+        if (id_x + i < srcLength) maxVal = fmaxf(maxVal, srcPtr[srcIdx + id_x + i]);
+    max_smem[hipThreadIdx_x] = maxVal;
     __syncthreads();  // syncthreads after max compute
 
     // Reduction of 256 floats on 256 threads per block in x dimension
@@ -134,12 +123,9 @@ __global__ void max_reduction_2d_hip_tensor(float* srcPtr, uint2 srcStridesNH,
     float* partialMaxRowPtr_smem =
         &partialMax_smem[hipThreadIdx_y][0];  // float pointer to beginning of each row in LDS
     partialMaxRowPtr_smem[hipThreadIdx_x] =
-        srcPtr[srcIdx];  // initialization of LDS to start value using all 16 x 16 threads
-
-    if ((id_y >= srcDims[id_z].height) || (id_x >= srcDims[id_z].width)) return;
-
-    srcIdx += ((id_y * srcStridesNH.y) + id_x);
-    partialMaxRowPtr_smem[hipThreadIdx_x] = srcPtr[srcIdx];
+        id_y < srcDims[id_z].height && id_x < srcDims[id_z].width
+            ? srcPtr[srcIdx + id_y * srcStridesNH.y + id_x]
+            : -INFINITY;
     __syncthreads();  // syncthreads
 
     // Reduction of 16 floats on 16 threads per block in x dimension (for every y dimension)
@@ -151,20 +137,16 @@ __global__ void max_reduction_2d_hip_tensor(float* srcPtr, uint2 srcStridesNH,
         __syncthreads();
     }
 
-    if (hipThreadIdx_x == 0) {
-        // Reduction of 16 floats on 16 threads per block in y dimension
-        for (int threadMax = 8, increment = 128; threadMax >= 1; threadMax /= 2, increment /= 2) {
-            if (hipThreadIdx_y < threadMax)
-                partialMaxRowPtr_smem[0] =
-                    fmaxf(partialMaxRowPtr_smem[0], partialMaxRowPtr_smem[increment]);
-            __syncthreads();
-        }
-
-        // Final store to dst
-        if (hipThreadIdx_y == 0)
-            maxArr[(hipBlockIdx_z * hipGridDim_y + hipBlockIdx_y) * hipGridDim_x + hipBlockIdx_x] =
-                partialMaxRowPtr_smem[0];
+    // Every thread must participate in each barrier, including padded rows.
+    for (int threadMax = 8; threadMax >= 1; threadMax /= 2) {
+        if (hipThreadIdx_x == 0 && hipThreadIdx_y < threadMax)
+            partialMax_smem[hipThreadIdx_y][0] = fmaxf(
+                partialMax_smem[hipThreadIdx_y][0], partialMax_smem[hipThreadIdx_y + threadMax][0]);
+        __syncthreads();
     }
+    if (hipThreadIdx_x == 0 && hipThreadIdx_y == 0)
+        maxArr[(hipBlockIdx_z * hipGridDim_y + hipBlockIdx_y) * hipGridDim_x + hipBlockIdx_x] =
+            partialMax_smem[0][0];
 }
 
 // -------------------- Set 2 - to decibels kernels --------------------
@@ -239,10 +221,10 @@ RppStatus hip_exec_to_decibels_tensor(Rpp32f* srcPtr, RpptDescPtr srcDescPtr, Rp
             HIP_CHECK_LAUNCH_RETURN();
         } else if (numDims == 2) {
             Rpp32s gridDim_x =
-                ceil(static_cast<Rpp32f>((srcDescPtr->strides.hStride) / LOCAL_THREADS_X));
+                ceil(static_cast<Rpp32f>(srcDescPtr->strides.hStride) / LOCAL_THREADS_X);
             Rpp32s gridDim_y = ceil(static_cast<Rpp32f>(srcDescPtr->h) / LOCAL_THREADS_Y);
             Rpp32s gridDim_z = ceil(static_cast<Rpp32f>(globalThreads_z) / LOCAL_THREADS_Z);
-            numBlocksPerSample = gridDim_x * gridDim_y * gridDim_z;
+            numBlocksPerSample = gridDim_x * gridDim_y;
             hipLaunchKernelGGL(max_reduction_2d_hip_tensor, dim3(gridDim_x, gridDim_y, gridDim_z),
                                dim3(LOCAL_THREADS_X, LOCAL_THREADS_Y, LOCAL_THREADS_Z), 0,
                                handle.GetStream(), srcPtr,
@@ -256,7 +238,7 @@ RppStatus hip_exec_to_decibels_tensor(Rpp32f* srcPtr, RpptDescPtr srcDescPtr, Rp
     Rpp32f* inverseMagnitudeTensor = partialMaxArr + globalThreads_z * numBlocksPerSample;
     hipLaunchKernelGGL(inverse_magnitude_hip_tensor, dim3(1, 1, globalThreads_z),
                        dim3(blockSize, 1, 1), 0, handle.GetStream(), partialMaxArr,
-                       numBlocksPerSample, computeMax, inverseMagnitudeTensor);
+                       numBlocksPerSample, computeMax, referenceMagnitude, inverseMagnitudeTensor);
     HIP_CHECK_LAUNCH_RETURN();
     RPP_HIP_RETURN_IF_ERROR(hipStreamSynchronize(handle.GetStream()));
 

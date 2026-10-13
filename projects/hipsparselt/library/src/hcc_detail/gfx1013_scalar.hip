@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 // Native gfx1013 fallback: ordinary scalar HIP instructions, host FP32 scalars,
-// strip pruning, and no fusion. The compressed buffer is backend-specific:
+// strip/4x4 tile pruning, and no fusion. The compressed buffer is backend-specific:
 // tightly packed retained values for each logical contraction row followed by
 // one byte per group containing two-bit indices. FP16/BF16 use 2:4, FP32 1:2.
 // Its orientation follows sparse A's rows or sparse B's columns after op().
@@ -244,6 +244,122 @@ namespace
                     = retain ? values[i] : T(0.0f);
             }
         }
+    }
+
+    template <class T>
+    __global__ void tile_kernel(
+        Matrix matrix, bool sparse_a, hipsparseOperation_t op, const T* input, T* output)
+    {
+        int64_t tile    = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+        int64_t k       = contraction(matrix, sparse_a, op);
+        int64_t length  = sparse_a ? rows(matrix, op) : cols(matrix, op);
+        int64_t columns = k / 4, per_batch = ((length + 3) / 4) * columns;
+        if(tile >= per_batch * matrix.batches)
+            return;
+        int     batch     = tile / per_batch;
+        int64_t first_row = ((tile % per_batch) / columns) * 4;
+        int64_t first_col = (tile % columns) * 4;
+        T       values[16];
+        double  magnitude[16];
+        for(int r = 0; r < 4; ++r)
+            for(int c = 0; c < 4; ++c)
+            {
+                values[r * 4 + c]    = first_row + r < length
+                                           ? input[offset(matrix,
+                                                          op,
+                                                          sparse_a ? first_row + r : first_col + c,
+                                                          sparse_a ? first_col + c : first_row + r,
+                                                          batch)]
+                                           : T(0.0f);
+                magnitude[r * 4 + c] = fabs(double(float(values[r * 4 + c])));
+            }
+        // Enumerate the six 2-of-4 masks for each of the first three rows.
+        // Column counts uniquely determine the fourth row. Precisely 90 of
+        // these 216 candidates have two selections in every row AND column.
+        // FP64 scores avoid overflowing finite BF16 magnitudes in FP32.
+        constexpr unsigned masks[6]   = {3, 5, 6, 9, 10, 12};
+        unsigned           best_mask  = 0xCC33;
+        double             best_score = -1;
+        for(unsigned a : masks)
+            for(unsigned b : masks)
+                for(unsigned c : masks)
+                {
+                    unsigned d          = 0;
+                    bool     admissible = true;
+                    for(int column = 0; column < 4; ++column)
+                    {
+                        int count = ((a >> column) & 1) + ((b >> column) & 1) + ((c >> column) & 1);
+                        admissible &= count == 1 || count == 2;
+                        if(count == 1)
+                            d |= 1u << column;
+                    }
+                    if(!admissible || __builtin_popcount(d) != 2)
+                        continue;
+                    unsigned mask  = a | (b << 4) | (c << 8) | (d << 12);
+                    double   score = 0;
+                    for(int i = 0; i < 16; ++i)
+                        if((mask >> i) & 1)
+                            score += magnitude[i];
+                    if(score > best_score || (score == best_score && mask < best_mask))
+                    {
+                        best_score = score;
+                        best_mask  = mask;
+                    }
+                }
+        for(int r = 0; r < 4 && first_row + r < length; ++r)
+            for(int c = 0; c < 4; ++c)
+                output[offset(matrix,
+                              op,
+                              sparse_a ? first_row + r : first_col + c,
+                              sparse_a ? first_col + c : first_row + r,
+                              batch)]
+                    = ((best_mask >> (r * 4 + c)) & 1) ? values[r * 4 + c] : T(0.0f);
+    }
+
+    hipsparseStatus_t launch_tile(const hipsparseLtHandle_t* handle,
+                                  const Matrix&              matrix,
+                                  int                        sparse_a,
+                                  hipsparseOperation_t       op,
+                                  const void*                input,
+                                  void*                      output,
+                                  hipStream_t                stream)
+    {
+        if(!valid(handle) || !matrix.sparse || !operation(op) || !input || !output
+           || (sparse_a != 0 && sparse_a != 1))
+            return HIPSPARSE_STATUS_INVALID_VALUE;
+        // TILE's 2-per-row/column masks are incompatible with FP32's 1:2
+        // contract: two retained values can land in the same adjacent pair.
+        if(matrix.type != HIP_R_16F && matrix.type != HIP_R_16BF)
+            return HIPSPARSE_STATUS_NOT_SUPPORTED;
+        int64_t k = contraction(matrix, sparse_a, op);
+        if(k % 4)
+            return HIPSPARSE_STATUS_NOT_SUPPORTED;
+        int64_t length = sparse_a ? rows(matrix, op) : cols(matrix, op);
+        int64_t count  = ((length + 3) / 4) * (k / 4) * matrix.batches;
+        dim3    grid((count + 63) / 64), block(64);
+        if(matrix.type == HIP_R_16F)
+            hipLaunchKernelGGL(tile_kernel<__half>,
+                               grid,
+                               block,
+                               0,
+                               stream,
+                               matrix,
+                               bool(sparse_a),
+                               op,
+                               (const __half*)input,
+                               (__half*)output);
+        else
+            hipLaunchKernelGGL(tile_kernel<hip_bfloat16>,
+                               grid,
+                               block,
+                               0,
+                               stream,
+                               matrix,
+                               bool(sparse_a),
+                               op,
+                               (const hip_bfloat16*)input,
+                               (hip_bfloat16*)output);
+        return hip_status(hipGetLastError());
     }
 
     template <class T>
@@ -792,6 +908,8 @@ hipsparseStatus_t hipsparseLtSpMMAPrune2(const hipsparseLtHandle_t*        h,
     Matrix m{};
     if(!read(d, m, matrix_tag))
         return HIPSPARSE_STATUS_INVALID_VALUE;
+    if(alg == HIPSPARSELT_PRUNE_SPMMA_TILE)
+        return launch_tile(h, m, sa, op, in, out, stream);
     if(alg != HIPSPARSELT_PRUNE_SPMMA_STRIP)
         return HIPSPARSE_STATUS_NOT_SUPPORTED;
     return launch_strip<false, false>(h, m, sa, op, in, out, nullptr, stream);

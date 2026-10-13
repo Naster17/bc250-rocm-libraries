@@ -73,41 +73,48 @@ namespace hiptensor
                || (desc->mDescC && !supportedOp(desc->mOpC)))
                 return HIPTENSOR_STATUS_NOT_SUPPORTED;
 
-            auto type = desc->mDescD->mType;
-            bool fp32
-                = (type == HIPTENSOR_R_16F || type == HIPTENSOR_R_16BF || type == HIPTENSOR_R_32F)
-                  && desc->mDescCompute == HIPTENSOR_COMPUTE_DESC_32F;
-            bool fp64 = type == HIPTENSOR_R_64F && desc->mDescCompute == HIPTENSOR_COMPUTE_DESC_64F;
-            if((!fp32 && !fp64) || desc->mDescA->mType != type || desc->mDescB->mType != type
-               || (desc->mDescC && desc->mDescC->mType != type))
+            auto inputType  = desc->mDescA->mType;
+            auto outputType = desc->mDescD->mType;
+            // Keep the public C/D dtype contract while permitting useful widened
+            // outputs. Inputs are converted before multiplication and accumulation.
+            bool fp32Input = inputType == HIPTENSOR_R_16F || inputType == HIPTENSOR_R_16BF
+                             || inputType == HIPTENSOR_R_32F;
+            bool fp32      = fp32Input && (outputType == inputType || outputType == HIPTENSOR_R_32F)
+                             && desc->mDescCompute == HIPTENSOR_COMPUTE_DESC_32F;
+            bool fp64      = (inputType == HIPTENSOR_R_32F || inputType == HIPTENSOR_R_64F)
+                             && outputType == HIPTENSOR_R_64F
+                             && desc->mDescCompute == HIPTENSOR_COMPUTE_DESC_64F;
+            if((!fp32 && !fp64) || desc->mDescB->mType != inputType
+               || (desc->mDescC && desc->mDescC->mType != outputType))
                 return HIPTENSOR_STATUS_NOT_SUPPORTED;
 
             std::map<int32_t, uint64_t> lengths;
-            auto                        collect = [&](hiptensorTensorDescriptor_t tensor,
-                                                      std::vector<int32_t> const& modes) {
-                if(!tensor)
-                    return modes.empty();
-                if(modes.size() != tensor->mLengths.size()
-                   || modes.size() != tensor->mStrides.size() || modes.size() > MaxModes)
-                    return false;
-                std::set<int32_t> unique;
-                uint64_t          extent = 1;
-                for(size_t i = 0; i < modes.size(); ++i)
-                {
-                    uint64_t len = tensor->mLengths[i], stride = tensor->mStrides[i];
-                    if(len == 0 || stride == 0 || len > std::numeric_limits<int64_t>::max()
-                       || stride > std::numeric_limits<int64_t>::max()
-                       || !unique.insert(modes[i]).second)
-                        return false;
-                    auto inserted = lengths.emplace(modes[i], len);
-                    if(!inserted.second && inserted.first->second != len)
-                        return false;
-                    if(len - 1 > (std::numeric_limits<uint64_t>::max() - extent) / stride)
-                        return false;
-                    extent += (len - 1) * stride;
-                }
-                return extent <= std::numeric_limits<int64_t>::max() / hiptensorDataTypeSize(type);
-            };
+            auto                        collect
+                = [&](hiptensorTensorDescriptor_t tensor, std::vector<int32_t> const& modes) {
+                      if(!tensor)
+                          return modes.empty();
+                      if(modes.size() != tensor->mLengths.size()
+                         || modes.size() != tensor->mStrides.size() || modes.size() > MaxModes)
+                          return false;
+                      std::set<int32_t> unique;
+                      uint64_t          extent = 1;
+                      for(size_t i = 0; i < modes.size(); ++i)
+                      {
+                          uint64_t len = tensor->mLengths[i], stride = tensor->mStrides[i];
+                          if(len == 0 || stride == 0 || len > std::numeric_limits<int64_t>::max()
+                             || stride > std::numeric_limits<int64_t>::max()
+                             || !unique.insert(modes[i]).second)
+                              return false;
+                          auto inserted = lengths.emplace(modes[i], len);
+                          if(!inserted.second && inserted.first->second != len)
+                              return false;
+                          if(len - 1 > (std::numeric_limits<uint64_t>::max() - extent) / stride)
+                              return false;
+                          extent += (len - 1) * stride;
+                      }
+                      return extent <= std::numeric_limits<int64_t>::max()
+                                           / hiptensorDataTypeSize(tensor->mType);
+                  };
             if(!collect(desc->mDescA, desc->mModeA) || !collect(desc->mDescB, desc->mModeB)
                || !collect(desc->mDescC, desc->mModeC) || !collect(desc->mDescD, desc->mModeD))
                 return HIPTENSOR_STATUS_INVALID_VALUE;
@@ -191,9 +198,14 @@ namespace hiptensor
             return value;
         }
 
-        template <class T, class Acc>
-        __global__ void scalarContraction(
-            ScalarProblem p, Acc alpha, const T* a, const T* b, Acc beta, const T* c, T* d)
+        template <class Input, class Output, class Acc>
+        __global__ void scalarContraction(ScalarProblem p,
+                                          Acc           alpha,
+                                          const Input*  a,
+                                          const Input*  b,
+                                          Acc           beta,
+                                          const Output* c,
+                                          Output*       d)
         {
             for(uint64_t out = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
                 out < p.outputElements;
@@ -226,11 +238,11 @@ namespace hiptensor
                 Acc value = alpha * sum;
                 if(beta != Acc(0))
                     value += beta * unary(Acc(c[cOffset]), p.opC);
-                d[dOffset] = T(value);
+                d[dOffset] = Output(value);
             }
         }
 
-        template <class T, class Acc>
+        template <class Input, class Output, class Acc>
         hiptensorStatus_t launch(ScalarProblem const& problem,
                                  const void*          alpha,
                                  const void*          a,
@@ -245,18 +257,18 @@ namespace hiptensor
             if(betaValue != Acc(0) && !c)
                 return HIPTENSOR_STATUS_INVALID_VALUE;
             uint32_t blocks = std::min<uint64_t>(65535, 1 + (problem.outputElements - 1) / 256);
-            hipLaunchKernelGGL((scalarContraction<T, Acc>),
+            hipLaunchKernelGGL((scalarContraction<Input, Output, Acc>),
                                dim3(blocks),
                                dim3(256),
                                0,
                                stream,
                                problem,
                                alphaValue,
-                               static_cast<const T*>(a),
-                               static_cast<const T*>(b),
+                               static_cast<const Input*>(a),
+                               static_cast<const Input*>(b),
                                betaValue,
-                               static_cast<const T*>(c),
-                               static_cast<T*>(d));
+                               static_cast<const Output*>(c),
+                               static_cast<Output*>(d));
             return hipGetLastError() == hipSuccess ? HIPTENSOR_STATUS_SUCCESS
                                                    : HIPTENSOR_STATUS_EXECUTION_FAILED;
         }
@@ -301,16 +313,23 @@ namespace hiptensor
            && (d != c || desc->mModeC != desc->mModeD
                || desc->mDescC->mStrides != desc->mDescD->mStrides))
             return HIPTENSOR_STATUS_NOT_SUPPORTED;
-        switch(desc->mDescD->mType)
+        switch(desc->mDescA->mType)
         {
         case HIPTENSOR_R_16F:
-            return launch<__half, float>(problem, alpha, a, b, beta, c, d, stream);
+            if(desc->mDescD->mType == HIPTENSOR_R_32F)
+                return launch<__half, float, float>(problem, alpha, a, b, beta, c, d, stream);
+            return launch<__half, __half, float>(problem, alpha, a, b, beta, c, d, stream);
         case HIPTENSOR_R_16BF:
-            return launch<hip_bfloat16, float>(problem, alpha, a, b, beta, c, d, stream);
+            if(desc->mDescD->mType == HIPTENSOR_R_32F)
+                return launch<hip_bfloat16, float, float>(problem, alpha, a, b, beta, c, d, stream);
+            return launch<hip_bfloat16, hip_bfloat16, float>(
+                problem, alpha, a, b, beta, c, d, stream);
         case HIPTENSOR_R_32F:
-            return launch<float, float>(problem, alpha, a, b, beta, c, d, stream);
+            if(desc->mDescD->mType == HIPTENSOR_R_64F)
+                return launch<float, double, double>(problem, alpha, a, b, beta, c, d, stream);
+            return launch<float, float, float>(problem, alpha, a, b, beta, c, d, stream);
         case HIPTENSOR_R_64F:
-            return launch<double, double>(problem, alpha, a, b, beta, c, d, stream);
+            return launch<double, double, double>(problem, alpha, a, b, beta, c, d, stream);
         default:
             return HIPTENSOR_STATUS_NOT_SUPPORTED;
         }
