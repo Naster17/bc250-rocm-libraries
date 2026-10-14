@@ -38,6 +38,7 @@
 #include "data_types.hpp"
 #include "hiptensor_options.hpp"
 #include "logger.hpp"
+#include "plan_validation.hpp"
 #include "util.hpp"
 
 // The elementwise kernels walk a single index space defined by the output, so an input may only
@@ -787,16 +788,21 @@ hiptensorStatus_t hiptensorCreatePlanPreference(const hiptensorHandle_t    handl
                                                 hiptensorAlgo_t            algo,
                                                 hiptensorJitMode_t         jitMode)
 {
-    *pref = new hiptensorPlanPreference();
-
-    (*pref)->mAutotuneMode     = HIPTENSOR_AUTOTUNE_MODE_NONE;
-    (*pref)->mCacheMode        = HIPTENSOR_CACHE_MODE_PEDANTIC;
-    (*pref)->mIncrementalCount = 0;
-    (*pref)->mKernelRank       = 0;
-    (*pref)->mJit              = jitMode;
-
-    (*pref)->mSelectionAlgorithm = algo;
-    (*pref)->mSolution           = nullptr;
+    if(!pref)
+        return HIPTENSOR_STATUS_NOT_INITIALIZED;
+    *pref = nullptr;
+    if(!handle)
+        return HIPTENSOR_STATUS_NOT_INITIALIZED;
+    bool scalar = handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013;
+    hiptensorPlanPreference candidate{};
+    candidate.mCacheMode = scalar ? HIPTENSOR_CACHE_MODE_NONE : HIPTENSOR_CACHE_MODE_PEDANTIC;
+    candidate.mAutotuneMode = HIPTENSOR_AUTOTUNE_MODE_NONE;
+    candidate.mJit = jitMode;
+    candidate.mSelectionAlgorithm = algo;
+    auto status = hiptensor::validatePlanPreference(&candidate, scalar);
+    if(status != HIPTENSOR_STATUS_SUCCESS)
+        return status;
+    *pref = new hiptensorPlanPreference(std::move(candidate));
 
     return HIPTENSOR_STATUS_SUCCESS;
 }
@@ -813,33 +819,33 @@ hiptensorStatus_t hiptensorPlanPreferenceSetAttribute(const hiptensorHandle_t   
                                                       const void*                        buf,
                                                       size_t sizeInBytes)
 {
-    hiptensorStatus_t retStatus = HIPTENSOR_STATUS_SUCCESS;
+    if(!handle || !pref || !buf)
+        return HIPTENSOR_STATUS_NOT_INITIALIZED;
+    auto candidate = *pref;
+    auto copy = [&](auto& field) {
+        if(sizeInBytes != sizeof(field))
+            return HIPTENSOR_STATUS_INVALID_VALUE;
+        std::memcpy(&field, buf, sizeof(field));
+        return HIPTENSOR_STATUS_SUCCESS;
+    };
+    hiptensorStatus_t status;
     switch(attr)
     {
-    case HIPTENSOR_PLAN_PREFERENCE_AUTOTUNE_MODE:
-        std::memcpy(&pref->mAutotuneMode, buf, sizeInBytes);
-        break;
-    case HIPTENSOR_PLAN_PREFERENCE_CACHE_MODE:
-        std::memcpy(&pref->mCacheMode, buf, sizeInBytes);
-        break;
-    case HIPTENSOR_PLAN_PREFERENCE_INCREMENTAL_COUNT:
-        std::memcpy(&pref->mIncrementalCount, buf, sizeInBytes);
-        break;
-    case HIPTENSOR_PLAN_PREFERENCE_ALGO:
-        std::memcpy(&pref->mSelectionAlgorithm, buf, sizeInBytes);
-        break;
-    case HIPTENSOR_PLAN_PREFERENCE_KERNEL_RANK:
-        std::memcpy(&pref->mKernelRank, buf, sizeInBytes);
-        break;
-    case HIPTENSOR_PLAN_PREFERENCE_JIT:
-        std::memcpy(&pref->mJit, buf, sizeInBytes);
-        break;
-    default:
-        retStatus = HIPTENSOR_STATUS_NOT_SUPPORTED;
-        break;
+    case HIPTENSOR_PLAN_PREFERENCE_AUTOTUNE_MODE: status = copy(candidate.mAutotuneMode); break;
+    case HIPTENSOR_PLAN_PREFERENCE_CACHE_MODE: status = copy(candidate.mCacheMode); break;
+    case HIPTENSOR_PLAN_PREFERENCE_INCREMENTAL_COUNT: status = copy(candidate.mIncrementalCount); break;
+    case HIPTENSOR_PLAN_PREFERENCE_ALGO: status = copy(candidate.mSelectionAlgorithm); break;
+    case HIPTENSOR_PLAN_PREFERENCE_KERNEL_RANK: status = copy(candidate.mKernelRank); break;
+    case HIPTENSOR_PLAN_PREFERENCE_JIT: status = copy(candidate.mJit); break;
+    default: return HIPTENSOR_STATUS_NOT_SUPPORTED;
     }
-
-    return retStatus;
+    if(status != HIPTENSOR_STATUS_SUCCESS)
+        return status;
+    status = hiptensor::validatePlanPreference(
+        &candidate, handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013);
+    if(status == HIPTENSOR_STATUS_SUCCESS)
+        *pref = std::move(candidate);
+    return status;
 }
 
 hiptensorStatus_t hiptensorPlanGetAttribute(const hiptensorHandle_t  handle,
@@ -848,18 +854,14 @@ hiptensorStatus_t hiptensorPlanGetAttribute(const hiptensorHandle_t  handle,
                                             void*                    buf,
                                             size_t                   sizeInBytes)
 {
-    hiptensorStatus_t retStatus = HIPTENSOR_STATUS_SUCCESS;
-    switch(attr)
-    {
-    case HIPTENSOR_PLAN_REQUIRED_WORKSPACE:
-        std::memcpy(buf, &plan->mRequiredWorkspace, sizeInBytes);
-        break;
-    default:
-        retStatus = HIPTENSOR_STATUS_NOT_SUPPORTED;
-        break;
-    }
-
-    return retStatus;
+    if(!handle || !plan || !buf)
+        return HIPTENSOR_STATUS_NOT_INITIALIZED;
+    if(attr != HIPTENSOR_PLAN_REQUIRED_WORKSPACE)
+        return HIPTENSOR_STATUS_NOT_SUPPORTED;
+    if(sizeInBytes != sizeof(plan->mRequiredWorkspace))
+        return HIPTENSOR_STATUS_INVALID_VALUE;
+    std::memcpy(buf, &plan->mRequiredWorkspace, sizeof(plan->mRequiredWorkspace));
+    return HIPTENSOR_STATUS_SUCCESS;
 }
 
 hiptensorStatus_t contractionGetWorkspaceSize(const hiptensorHandle_t              handle,
@@ -879,6 +881,16 @@ hiptensorStatus_t hiptensorEstimateWorkspaceSize(const hiptensorHandle_t        
                                                  const hiptensorWorksizePreference_t  workspacePref,
                                                  uint64_t* workspaceSizeEstimate)
 {
+    if(!handle || !desc || !planPref || !workspaceSizeEstimate)
+        return HIPTENSOR_STATUS_NOT_INITIALIZED;
+    if(workspacePref != HIPTENSOR_WORKSPACE_MIN && workspacePref != HIPTENSOR_WORKSPACE_DEFAULT
+       && workspacePref != HIPTENSOR_WORKSPACE_MAX)
+        return HIPTENSOR_STATUS_INVALID_VALUE;
+    auto status = hiptensor::validatePlanPreference(
+        planPref, handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013);
+    if(status != HIPTENSOR_STATUS_SUCCESS)
+        return status;
+
     if(desc->mOperationType == HIPTENSOR_CONTRACTION)
     {
         return contractionGetWorkspaceSize(
@@ -909,9 +921,18 @@ hiptensorStatus_t hiptensorCreatePlan(const hiptensorHandle_t              handl
                                       const hiptensorPlanPreference_t      pref,
                                       uint64_t                             workspaceSizeLimit)
 {
-    (*plan)                     = new hiptensorPlan();
-    hiptensorPlan_t newPlan     = *plan;
-    newPlan->mRequiredWorkspace = workspaceSizeLimit;
+    if(!plan)
+        return HIPTENSOR_STATUS_NOT_INITIALIZED;
+    *plan = nullptr;
+    if(!handle || !desc || !pref)
+        return HIPTENSOR_STATUS_NOT_INITIALIZED;
+    auto status = hiptensor::validatePlanPreference(
+        pref, handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013);
+    if(status != HIPTENSOR_STATUS_SUCCESS)
+        return status;
+    auto ownedPlan = std::make_unique<hiptensorPlan>();
+    auto newPlan = ownedPlan.get();
+    newPlan->mRequiredWorkspace = 0;
 
     // Deep-copy the tensor descriptors referenced by the operation descriptor
     if(desc->mDescA)
@@ -948,16 +969,12 @@ hiptensorStatus_t hiptensorCreatePlan(const hiptensorHandle_t              handl
     newPlan->mPref   = newPlan->mOwnedPref.get();
 
     if(desc->mOperationType == HIPTENSOR_CONTRACTION)
-    {
-        return contractionInitPlan(
-            handle, newPlan, newPlan->mOpDesc, newPlan->mPref, workspaceSizeLimit);
-    }
-    if(desc->mOperationType == HIPTENSOR_CONTRACTION_TRINARY)
-    {
-        return contractionTrinaryInitPlan(
-            handle, newPlan, newPlan->mOpDesc, newPlan->mPref, workspaceSizeLimit);
-    }
-    return HIPTENSOR_STATUS_SUCCESS;
+        status = contractionInitPlan(handle, newPlan, newPlan->mOpDesc, newPlan->mPref, workspaceSizeLimit);
+    else if(desc->mOperationType == HIPTENSOR_CONTRACTION_TRINARY)
+        status = contractionTrinaryInitPlan(handle, newPlan, newPlan->mOpDesc, newPlan->mPref, workspaceSizeLimit);
+    if(status == HIPTENSOR_STATUS_SUCCESS)
+        *plan = ownedPlan.release();
+    return status;
 }
 
 hiptensorStatus_t hiptensorDestroyPlan(hiptensorPlan_t plan)
