@@ -33,7 +33,8 @@ struct BlockTopkStream2D
                                    const OutWindow& out_window,
                                    const IdxWindow& idx_window,
                                    index_t k,
-                                   number<dim> = {})
+                                   number<dim>        = {},
+                                   index_t valid_cols = numeric<index_t>::max())
     {
         OutWindow out_window_tmp = out_window;
         IdxWindow idx_window_tmp = idx_window;
@@ -42,12 +43,22 @@ struct BlockTopkStream2D
             std::is_same_v<typename DistributedTensor::DataType, DataType>);
         static_assert(std::is_same_v<typename IdxWindow::DataType, IndexType>);
 
-        DistributedTensor x_tmp = x;
+        auto selected           = tile_elementwise_in([](const auto&) { return index_t{0}; }, x);
         constexpr auto dst_dist = typename IdxWindow::TileDstr{};
 
         // argmax for topk
         const auto f_argmax = [](ArgmaxPacket e0, ArgmaxPacket e1) {
-            return e0.arg > e1.arg ? e0 : e1;
+            if(e0.value == numeric<index_t>::max())
+                return e1;
+            if(e1.value == numeric<index_t>::max())
+                return e0;
+            const bool nan0 = e0.arg != e0.arg;
+            const bool nan1 = e1.arg != e1.arg;
+            if(nan0 != nan1)
+                return nan0 ? e0 : e1;
+            if(nan0 && nan1)
+                return e0.value < e1.value ? e0 : e1;
+            return e0.arg > e1.arg || (e0.arg == e1.arg && e0.value < e1.value) ? e0 : e1;
         };
 
         for(index_t i_k = 0; i_k < k; i_k++)
@@ -62,15 +73,18 @@ struct BlockTopkStream2D
                             tmp.get_tile_distribution(), make_tuple(idx0, idx1));
                         constexpr auto i_j_idx = make_tuple(idx0, idx1);
                         ArgmaxPacket t;
-                        t.arg        = x_tmp(i_j_idx); // !!! we reference x here
-                        t.value      = tile_idx.at(number<1>{});
+                        t.arg          = x[i_j_idx];
+                        const auto col = tile_idx.at(number<1>{});
+                        t.value =
+                            selected(i_j_idx) || col >= valid_cols ? numeric<index_t>::max() : col;
                         tmp(i_j_idx) = t;
                     });
                 });
                 return tmp;
             }();
 
-            auto argmax_init = ArgmaxPacket{-numeric<DataType>::infinity(), 0};
+            auto argmax_init =
+                ArgmaxPacket{-numeric<DataType>::infinity(), numeric<index_t>::max()};
             auto r = block_tile_reduce<ArgmaxPacket>(packet, sequence<1>{}, f_argmax, argmax_init);
             block_tile_reduce_xor_sync(r, f_argmax);
 
@@ -94,8 +108,7 @@ struct BlockTopkStream2D
 
                     constexpr auto i_j_idx = make_tuple(idx0, idx1);
 
-                    x_tmp(i_j_idx) = (col_id == r(i_j_idx).value) ? -numeric<DataType>::infinity()
-                                                                  : x_tmp(i_j_idx);
+                    selected(i_j_idx) |= col_id == r(i_j_idx).value;
                 });
             });
 

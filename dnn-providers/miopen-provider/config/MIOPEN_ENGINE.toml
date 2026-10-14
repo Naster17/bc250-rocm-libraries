@@ -106,6 +106,19 @@ rtol = 0.01
 # IS_WORKAROUND_ISSUE_6979 / shouldSkipOnEngineConfigResult in
 # dnn-providers/miopen-provider/tests/common/TestWorkarounds.hpp.
 [[test_skips]]
-archs   = ["gfx90a", "gfx10", "gfx11", "gfx12"]
+# gfx1013 has a sequential homogeneous-storage backend; enable its real tests.
+archs   = ["gfx90a", "gfx1010", "gfx1011", "gfx1012", "gfx103", "gfx11", "gfx12"]
 filters = ["*ConvFwdBiasActiv*"]
 reason  = "ROCm/rocm-libraries#6979 — no engine has an applicable solution for ConvBiasActiv fusion (gfx90a returns wrong results; RDNA archs have no CK fusion kernels)"
+
+# Existing low-precision fixtures request FP32 virtual intermediates. The native
+# sequential backend currently requires homogeneous storage on every graph edge.
+[[test_skips]]
+archs = ["gfx1013"]
+filters = [
+    "Smoke/IntegrationGpuConvFwdBiasActiv2dFp16.*",
+    "Smoke/IntegrationGpuConvFwdBiasActiv3dFp16.*",
+    "Smoke/IntegrationGpuConvFwdBiasActiv2dBfp16.*",
+    "Smoke/IntegrationGpuConvFwdBiasActiv3dBfp16.*",
+]
+reason = "gfx1013 sequential convolution fusion requires homogeneous intermediate storage; dedicated homogeneous fixtures execute separately"

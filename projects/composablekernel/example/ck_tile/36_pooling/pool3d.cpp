@@ -30,6 +30,8 @@ auto create_args(int argc, char* argv[])
         .insert("RightPz", "1", "right padding d")
         .insert("RightPy", "1", "right padding h")
         .insert("RightPx", "1", "right padding w")
+        .insert("prec", "fp16", "fp16/bf16/fp32 precision")
+        .insert("op", "max", "max/min/sum pooling reduction")
         .insert("v", "1", "cpu validation or not")
         .insert("warmup", "20", "cold iter")
         .insert("repeat", "100", "hot iter");
@@ -41,7 +43,9 @@ auto create_args(int argc, char* argv[])
 template <typename InDataType,
           typename OutDataType,
           typename ComputeDataType,
-          typename IndexDataType>
+          typename IndexDataType,
+          typename ReduceOp,
+          bool OutputIndex>
 bool run(const ck_tile::ArgParser& arg_parser)
 {
 
@@ -87,7 +91,6 @@ bool run(const ck_tile::ArgParser& arg_parser)
     int warmup        = arg_parser.get_int("warmup");
     int repeat        = arg_parser.get_int("repeat");
 
-    constexpr bool OutputIndex  = true;
     constexpr bool PropagateNan = false;
 
     // Shapes / strides / parameters (NDHWC)
@@ -119,7 +122,6 @@ bool run(const ck_tile::ArgParser& arg_parser)
 
     in_buf.ToDevice(in.data());
 
-    using ReduceOp   = ck_tile::ReduceOp::Max;
     using BlockWarps = ck_tile::sequence<1, 1>;
     using BlockTile  = ck_tile::sequence<128, 1>;
     using WarpTile   = ck_tile::sequence<128, 1>;
@@ -206,11 +208,34 @@ bool run(const ck_tile::ArgParser& arg_parser)
     return pass;
 }
 
+template <typename T>
+bool dispatch_pool(const ck_tile::ArgParser& args)
+{
+    const auto op = args.get_str("op");
+    if(op == "max")
+        return run<T, T, float, ck_tile::index_t, ck_tile::ReduceOp::Max, true>(args);
+    if(op == "min")
+        return run<T, T, float, ck_tile::index_t, ck_tile::ReduceOp::Min, true>(args);
+    if(op == "sum")
+        return run<T, T, float, ck_tile::index_t, ck_tile::ReduceOp::Add, false>(args);
+    throw std::runtime_error("Unsupported pooling reduction");
+}
+
 int main(int argc, char* argv[])
 {
     auto [result, arg_parser] = create_args(argc, argv);
     if(!result)
         return -1;
 
-    return run<ck_tile::half_t, ck_tile::half_t, float, ck_tile::index_t>(arg_parser) ? 0 : -2;
+    const auto prec = arg_parser.get_str("prec");
+    bool pass       = false;
+    if(prec == "fp16")
+        pass = dispatch_pool<ck_tile::half_t>(arg_parser);
+    else if(prec == "bf16")
+        pass = dispatch_pool<ck_tile::bf16_t>(arg_parser);
+    else if(prec == "fp32")
+        pass = dispatch_pool<float>(arg_parser);
+    else
+        throw std::runtime_error("Unsupported pooling precision");
+    return pass ? 0 : -2;
 }

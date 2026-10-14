@@ -27,6 +27,12 @@
 #include "hipblaslt/hipblaslt-ext.hpp"
 #include "exceptions.hpp"
 #include "hipblaslt_internal.hpp"
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+#include "gfx1013_scalar.hpp"
+#include "handle.h"
+#include <climits>
+#include <cstring>
+#endif
 #include <Debug.hpp>
 #include <algorithm>
 #include <hip/hip_runtime.h>
@@ -288,8 +294,8 @@ namespace hipblaslt_ext
             = RocblasltContractionProblem::ScalingFormat::None;
         RocblasltContractionProblem::ScalingFormat scaling_b_type
             = RocblasltContractionProblem::ScalingFormat::None;
-        float act0;
-        float act1;
+        float act0 = 0;
+        float act1 = 0;
     };
 
     GemmEpilogue::GemmEpilogue()
@@ -711,6 +717,211 @@ namespace hipblaslt_ext
     // End of pimpl classes
     /////////////////////////////////////////////////////
 
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+    namespace
+    {
+        // Reuse the existing opaque instance storage; the public C++ ABI is unchanged.
+        struct ScalarProblem
+        {
+            _rocblaslt_matmul_desc   op;
+            _rocblaslt_matrix_layout a, b, c, d;
+            const void *             alpha = nullptr, *A = nullptr, *B = nullptr;
+            const void *             beta = nullptr, *C = nullptr;
+            void*                    D          = nullptr;
+            float                    alpha_host = 0, beta_host = 0;
+        };
+        struct ScalarInstance
+        {
+            std::vector<ScalarProblem> problems;
+            bool                       initialized = false;
+        };
+        hipblasLtMatmulDesc_t scalar_desc(ScalarProblem& p)
+        {
+            return reinterpret_cast<hipblasLtMatmulDesc_t>(&p.op);
+        }
+        hipblasLtMatrixLayout_t scalar_layout(_rocblaslt_matrix_layout& x)
+        {
+            return reinterpret_cast<hipblasLtMatrixLayout_t>(&x);
+        }
+        GemmProblemType scalar_problem_type(const ScalarProblem& p)
+        {
+            GemmProblemType type(p.op.op_A,
+                                 p.op.op_B,
+                                 p.a.type,
+                                 p.b.type,
+                                 p.c.type,
+                                 p.d.type,
+                                 static_cast<hipblasComputeType_t>(p.op.compute_type_original));
+            type.setOrderA(p.a.order);
+            type.setOrderB(p.b.order);
+            return type;
+        }
+        hipblasStatus_t scalar_check(hipblasLtHandle_t handle, ScalarProblem& p)
+        {
+            if(!p.alpha || !p.beta)
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            return gfx1013_scalar::supported(handle,
+                                             scalar_desc(p),
+                                             scalar_layout(p.a),
+                                             scalar_layout(p.b),
+                                             scalar_layout(p.c),
+                                             scalar_layout(p.d));
+        }
+        hipblasStatus_t scalar_clone(ScalarProblem&          p,
+                                     hipblasLtMatmulDesc_t   desc,
+                                     const void*             alpha,
+                                     const void*             A,
+                                     hipblasLtMatrixLayout_t a,
+                                     const void*             B,
+                                     hipblasLtMatrixLayout_t b,
+                                     const void*             beta,
+                                     const void*             C,
+                                     hipblasLtMatrixLayout_t c,
+                                     void*                   D,
+                                     hipblasLtMatrixLayout_t d)
+        {
+            if(!desc || !a || !b || !d)
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            p.op = *reinterpret_cast<rocblaslt_matmul_desc>(desc);
+            p.op.m_data.reset();
+            p.a     = *reinterpret_cast<rocblaslt_matrix_layout>(a);
+            p.b     = *reinterpret_cast<rocblaslt_matrix_layout>(b);
+            p.c     = *reinterpret_cast<rocblaslt_matrix_layout>(c ? c : d);
+            p.d     = *reinterpret_cast<rocblaslt_matrix_layout>(d);
+            p.alpha = alpha;
+            p.A     = A;
+            p.B     = B;
+            p.beta  = beta;
+            p.C     = C;
+            p.D     = D;
+            return HIPBLAS_STATUS_SUCCESS;
+        }
+        hipblasStatus_t scalar_typed(ScalarProblem&         p,
+                                     int64_t                m,
+                                     int64_t                n,
+                                     int64_t                k,
+                                     int64_t                batch,
+                                     int64_t                lda,
+                                     int64_t                ldb,
+                                     int64_t                ldc,
+                                     int64_t                ldd,
+                                     int64_t                sa,
+                                     int64_t                sb,
+                                     int64_t                sc,
+                                     int64_t                sd,
+                                     GemmEpilogue&          e,
+                                     const GemmInputs&      i,
+                                     const GemmProblemType& t,
+                                     bool                   scaled = false)
+        {
+            if(m <= 0 || n <= 0 || k < 0 || batch < 1 || batch > INT_MAX)
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            if(i.getScaleA() || i.getScaleB() || i.getScaleC() || i.getScaleD() || i.getScaleAux()
+               || i.getScaleAlphaVec() || i.getAmaxD() || scaled)
+                return HIPBLAS_STATUS_NOT_SUPPORTED;
+            p.op.op_A         = t.getOpA();
+            p.op.op_B         = t.getOpB();
+            p.op.compute_type = p.op.compute_type_original
+                = static_cast<rocblaslt_compute_type>(t.getTypeCompute());
+            p.op.scale_type = HIP_R_32F;
+            p.op.epilogue   = static_cast<rocblaslt_epilogue>(e.getMode());
+            p.op.bias       = const_cast<void*>(i.getBias());
+            p.op.bias_type  = e.getBiasDataType();
+            p.op.e          = const_cast<void*>(i.getAux());
+            p.op.aux_type   = e.getAuxDataType();
+            p.op.lde        = e.getAuxLeadingDimension();
+            p.op.stride_e   = e.getAuxBatchStride();
+            p.op.act0       = e.getAct0();
+            p.op.act1       = e.getAct1();
+            const auto init = [batch](_rocblaslt_matrix_layout& x,
+                                      hipDataType               type,
+                                      int64_t                   rows,
+                                      int64_t                   cols,
+                                      int64_t                   ld,
+                                      int64_t                   stride,
+                                      hipblasLtOrder_t          order) {
+                x.type         = type;
+                x.m            = rows;
+                x.n            = cols;
+                x.ld           = ld;
+                x.batch_count  = int32_t(batch);
+                x.batch_stride = stride;
+                x.order        = order;
+            };
+            init(p.a,
+                 t.getTypeA(),
+                 t.getOpA() == HIPBLAS_OP_N ? m : k,
+                 t.getOpA() == HIPBLAS_OP_N ? k : m,
+                 lda,
+                 sa,
+                 t.getOrderA());
+            init(p.b,
+                 t.getTypeB(),
+                 t.getOpB() == HIPBLAS_OP_N ? k : n,
+                 t.getOpB() == HIPBLAS_OP_N ? n : k,
+                 ldb,
+                 sb,
+                 t.getOrderB());
+            init(p.c, t.getTypeC(), m, n, ldc, sc, HIPBLASLT_ORDER_COL);
+            init(p.d, t.getTypeD(), m, n, ldd, sd, HIPBLASLT_ORDER_COL);
+            p.alpha = i.getAlpha();
+            p.beta  = i.getBeta();
+            p.A     = i.getA();
+            p.B     = i.getB();
+            p.C     = i.getC();
+            p.D     = const_cast<void*>(i.getD());
+            return HIPBLAS_STATUS_SUCCESS;
+        }
+        hipblasStatus_t scalar_publish(hipblasLtHandle_t               handle,
+                                       std::shared_ptr<ScalarInstance> candidate,
+                                       std::shared_ptr<void>&          data,
+                                       size_t&                         count)
+        {
+            // On failure the old problem is invalidated instead of accidentally running it.
+            data.reset();
+            count = 0;
+            if(candidate->problems.empty())
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            for(auto& p : candidate->problems)
+            {
+                auto status = scalar_check(handle, p);
+                if(status != HIPBLAS_STATUS_SUCCESS)
+                    return status;
+                if(p.op.pointermode == rocblaslt_pointer_mode_host)
+                {
+                    // C++ setProblem captures scalar values, just like Tensile inputs.
+                    std::memcpy(&p.alpha_host, p.alpha, sizeof(float));
+                    std::memcpy(&p.beta_host, p.beta, sizeof(float));
+                }
+            }
+            count = candidate->problems.size();
+            data  = std::move(candidate);
+            return HIPBLAS_STATUS_SUCCESS;
+        }
+        hipblasStatus_t scalar_instance_supported(hipblasLtHandle_t            handle,
+                                                  const std::shared_ptr<void>& data,
+                                                  const hipblasLtMatmulAlgo_t& algo,
+                                                  size_t&                      workspace)
+        {
+            workspace = 0;
+            if(!data)
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            if(!gfx1013_scalar::is_algo(algo))
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            auto state = std::static_pointer_cast<ScalarInstance>(data);
+            if(state->problems.empty())
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            for(auto& p : state->problems)
+            {
+                auto status = scalar_check(handle, p);
+                if(status != HIPBLAS_STATUS_SUCCESS)
+                    return status;
+            }
+            return HIPBLAS_STATUS_SUCCESS;
+        }
+    }
+#endif
+
     // Gemm Instance
     ////////////////////////////////////////////////////////////
 
@@ -738,6 +949,20 @@ namespace hipblaslt_ext
         const GemmPreference&                          pref,
         std::vector<hipblasLtMatmulHeuristicResult_t>& heuristicResults)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        heuristicResults.clear();
+        if(!m_data || !m_gemm_count || requestedAlgoCount < 1)
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        if(pref.getStreamKTileSchedulingMode() != HIPBLASLT_STREAMK_TILE_SCHEDULING_OFF)
+            return HIPBLAS_STATUS_NOT_SUPPORTED;
+        auto   scalar_algo      = gfx1013_scalar::algorithm();
+        size_t scalar_workspace = 0;
+        auto   scalar_status
+            = scalar_instance_supported(m_handle, m_data, scalar_algo.algo, scalar_workspace);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            heuristicResults.push_back(scalar_algo);
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtAlgoGetHeuristicV2Cpp");
         if(m_gemm_count == 0)
         {
@@ -768,6 +993,9 @@ namespace hipblaslt_ext
                                                   size_t&                workspaceSizeInBytes)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return scalar_instance_supported(m_handle, m_data, algo, workspaceSizeInBytes);
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtIsAlgoSupportedCpp");
         auto                    gemmType = static_cast<rocblaslt::RocGemmType>(m_gemm_type);
         applyStreamKTileSchedulingMode(m_data, gemmType, m_streamk_tile_scheduling_mode);
@@ -790,6 +1018,11 @@ namespace hipblaslt_ext
                                                   size_t&                workspaceSizeInBytes)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        if(tuning.getSplitK() || tuning.getWgm())
+            return HIPBLAS_STATUS_NOT_SUPPORTED;
+        return scalar_instance_supported(m_handle, m_data, algo, workspaceSizeInBytes);
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtIsAlgoSupportedTuningV2Cpp");
         auto gemmType  = static_cast<rocblaslt::RocGemmType>(m_gemm_type);
         applyStreamKTileSchedulingMode(m_data, gemmType, m_streamk_tile_scheduling_mode);
@@ -828,6 +1061,17 @@ namespace hipblaslt_ext
                                              hipStream_t                  stream)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        if(m_data)
+            std::static_pointer_cast<ScalarInstance>(m_data)->initialized = false;
+        if(useUserArgs)
+            return HIPBLAS_STATUS_NOT_SUPPORTED;
+        size_t scalar_workspace = 0;
+        auto   scalar_status = scalar_instance_supported(m_handle, m_data, algo, scalar_workspace);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            std::static_pointer_cast<ScalarInstance>(m_data)->initialized = true;
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtInitializeCpp");
         if((m_gemm_count == 0) || (workspace == nullptr && m_workspace_bytes > 0))
         {
@@ -862,6 +1106,19 @@ namespace hipblaslt_ext
                                              hipStream_t                  stream)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        if(tuning.getSplitK() || tuning.getWgm())
+            return HIPBLAS_STATUS_NOT_SUPPORTED;
+        if(m_data)
+            std::static_pointer_cast<ScalarInstance>(m_data)->initialized = false;
+        if(useUserArgs)
+            return HIPBLAS_STATUS_NOT_SUPPORTED;
+        size_t scalar_workspace = 0;
+        auto   scalar_status = scalar_instance_supported(m_handle, m_data, algo, scalar_workspace);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            std::static_pointer_cast<ScalarInstance>(m_data)->initialized = true;
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtInitializeTuningV2Cpp");
         if((m_gemm_count == 0) || (workspace == nullptr && m_workspace_bytes > 0))
         {
@@ -892,6 +1149,40 @@ namespace hipblaslt_ext
     hipblasStatus_t GemmInstance::run(hipStream_t stream, hipEvent_t start, hipEvent_t stop)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        if(!m_data || !m_gemm_count)
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        auto scalar_state = std::static_pointer_cast<ScalarInstance>(m_data);
+        if(!scalar_state->initialized)
+            return HIPBLAS_STATUS_NOT_INITIALIZED;
+        if(start && hipEventRecord(start, stream) != hipSuccess)
+            return HIPBLAS_STATUS_EXECUTION_FAILED;
+        for(auto& p : scalar_state->problems)
+        {
+            auto status = gfx1013_scalar::matmul(
+                m_handle,
+                scalar_desc(p),
+                p.op.pointermode == rocblaslt_pointer_mode_host ? &p.alpha_host : p.alpha,
+                p.A,
+                scalar_layout(p.a),
+                p.B,
+                scalar_layout(p.b),
+                p.op.pointermode == rocblaslt_pointer_mode_host ? &p.beta_host : p.beta,
+                p.C,
+                scalar_layout(p.c),
+                p.D,
+                scalar_layout(p.d),
+                nullptr,
+                nullptr,
+                0,
+                stream);
+            if(status != HIPBLAS_STATUS_SUCCESS)
+                return status;
+        }
+        if(stop && hipEventRecord(stop, stream) != hipSuccess)
+            return HIPBLAS_STATUS_EXECUTION_FAILED;
+        return HIPBLAS_STATUS_SUCCESS;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtRunCpp");
         if(m_gemm_count == 0)
         {
@@ -912,6 +1203,9 @@ namespace hipblaslt_ext
 
     std::string GemmInstance::getSolutionName()
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return m_gemm_count ? "gfx1013_scalar_fma_16x16" : "";
+#endif
         auto gemmType = static_cast<rocblaslt::RocGemmType>(m_gemm_type);
         return rocblaslt_get_solution_name_from_data_cpp(
             (rocblaslt_handle)m_handle, gemmType, m_data);
@@ -919,6 +1213,9 @@ namespace hipblaslt_ext
 
     std::string GemmInstance::getKernelName()
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return m_gemm_count ? "gfx1013_scalar_fma_16x16" : "";
+#endif
         auto gemmType = static_cast<rocblaslt::RocGemmType>(m_gemm_type);
         return rocblaslt_get_kernel_name_from_data_cpp(
             (rocblaslt_handle)m_handle, gemmType, m_data);
@@ -934,6 +1231,11 @@ namespace hipblaslt_ext
                hipblasComputeType_t typeCompute)
         : GemmInstance(handle, GemmType::HIPBLASLT_GEMM)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        m_problem_types.push_back({opA, opB, typeA, typeB, typeC, typeD, typeCompute});
+        m_data = std::make_shared<ScalarInstance>();
+        return;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtCreateGemmCpp");
         m_problem_types.push_back({opA, opB, typeA, typeB, typeC, typeD, typeCompute});
         rocblaslt_init_gemmData((rocblaslt_handle)m_handle,
@@ -983,6 +1285,15 @@ namespace hipblaslt_ext
                                      GemmEpilogue& epilogue,
                                      GemmInputs&   inputs)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        if(m <= 0 || n <= 0 || k < 0 || m > INT_MAX || n > INT_MAX || k > INT_MAX
+           || m_problem_types.empty())
+        {
+            m_data.reset();
+            m_gemm_count = 0;
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        }
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGemmSetProblemV2Cpp");
         if(n == 0 || m == 0)
         {
@@ -1031,6 +1342,38 @@ namespace hipblaslt_ext
                                      GemmInputs&      inputs,
                                      GemmProblemType& problemtype)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        m_data.reset();
+        m_gemm_count      = 0;
+        auto scalar_state = std::make_shared<ScalarInstance>();
+        scalar_state->problems.resize(1);
+        auto scalar_status = scalar_typed(
+            scalar_state->problems[0],
+            m,
+            n,
+            k,
+            batch_count,
+            lda,
+            ldb,
+            ldc,
+            ldd,
+            strideA,
+            strideB,
+            strideC,
+            strideD,
+            epilogue,
+            inputs,
+            problemtype,
+            epilogue.pimpl->scaling_a_type != RocblasltContractionProblem::ScalingFormat::None
+                || epilogue.pimpl->scaling_b_type
+                       != RocblasltContractionProblem::ScalingFormat::None);
+        if(scalar_status != HIPBLAS_STATUS_SUCCESS)
+            return scalar_status;
+        scalar_status = scalar_publish(m_handle, scalar_state, m_data, m_gemm_count);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            m_problem_types = {problemtype};
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGemmSetProblemFullV2Cpp");
         auto rocepilogue = reinterpret_cast<rocblaslt::RocGemmEpilogueV2*>(epilogue.pimpl.get());
         auto rocepinputs = reinterpret_cast<rocblaslt::RocGemmInputsV2*>(inputs.pimpl.get());
@@ -1075,6 +1418,33 @@ namespace hipblaslt_ext
                                      void*                   D,
                                      hipblasLtMatrixLayout_t matD)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        m_data.reset();
+        m_gemm_count      = 0;
+        auto scalar_state = std::make_shared<ScalarInstance>();
+        scalar_state->problems.resize(1);
+        auto scalar_status = scalar_clone(scalar_state->problems[0],
+                                          matmul_descr,
+                                          alpha,
+                                          A,
+                                          matA,
+                                          B,
+                                          matB,
+                                          beta,
+                                          C,
+                                          matC,
+                                          D,
+                                          matD);
+        if(scalar_status != HIPBLAS_STATUS_SUCCESS)
+            return scalar_status;
+        scalar_status = scalar_publish(m_handle, scalar_state, m_data, m_gemm_count);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+        {
+            auto& p         = scalar_state->problems[0];
+            m_problem_types = {scalar_problem_type(p)};
+        }
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGemmSetProblemCAPICpp");
         auto rocproblemtypes
             = reinterpret_cast<std::vector<rocblaslt::RocGemmProblemTypeV2>*>(&m_problem_types);
@@ -1113,6 +1483,11 @@ namespace hipblaslt_ext
                                               hipblasComputeType_t typeCompute)
         : GemmInstance(handle, GemmType::HIPBLASLT_GROUPED_GEMM)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        m_problem_types.push_back({opA, opB, typeA, typeB, typeC, typeD, typeCompute});
+        m_data = std::make_shared<ScalarInstance>();
+        return;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtCreateGroupedGemmCpp");
         m_problem_types.push_back({opA, opB, typeA, typeB, typeC, typeD, typeCompute});
         rocblaslt_init_gemmData((rocblaslt_handle)m_handle,
@@ -1162,6 +1537,24 @@ namespace hipblaslt_ext
                                             std::vector<GemmEpilogue>& epilogue,
                                             std::vector<GemmInputs>&   inputs)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        if(m.empty() || n.size() != m.size() || k.size() != m.size()
+           || batch_count.size() != m.size() || epilogue.size() != m.size()
+           || inputs.size() != m.size() || m_problem_types.size() != 1)
+        {
+            m_data.reset();
+            m_gemm_count = 0;
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        }
+        for(size_t i = 0; i < m.size(); ++i)
+            if(m[i] <= 0 || n[i] <= 0 || k[i] < 0 || m[i] > INT_MAX || n[i] > INT_MAX
+               || k[i] > INT_MAX)
+            {
+                m_data.reset();
+                m_gemm_count = 0;
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            }
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGroupedGemmSetProblemV2Cpp");
         std::vector<int64_t> lda;
         std::vector<int64_t> ldb;
@@ -1218,6 +1611,50 @@ namespace hipblaslt_ext
                                             std::vector<GemmInputs>&   inputs,
                                             GemmProblemType&           problemtype)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        m_data.reset();
+        m_gemm_count            = 0;
+        const auto scalar_count = m.size();
+        if(!scalar_count || n.size() != scalar_count || k.size() != scalar_count
+           || batch_count.size() != scalar_count || lda.size() != scalar_count
+           || ldb.size() != scalar_count || ldc.size() != scalar_count || ldd.size() != scalar_count
+           || strideA.size() != scalar_count || strideB.size() != scalar_count
+           || strideC.size() != scalar_count || strideD.size() != scalar_count
+           || epilogue.size() != scalar_count || inputs.size() != scalar_count)
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        auto scalar_state = std::make_shared<ScalarInstance>();
+        scalar_state->problems.resize(scalar_count);
+        for(size_t scalar_i = 0; scalar_i < scalar_count; ++scalar_i)
+        {
+            auto status
+                = scalar_typed(scalar_state->problems[scalar_i],
+                               m[scalar_i],
+                               n[scalar_i],
+                               k[scalar_i],
+                               batch_count[scalar_i],
+                               lda[scalar_i],
+                               ldb[scalar_i],
+                               ldc[scalar_i],
+                               ldd[scalar_i],
+                               strideA[scalar_i],
+                               strideB[scalar_i],
+                               strideC[scalar_i],
+                               strideD[scalar_i],
+                               epilogue[scalar_i],
+                               inputs[scalar_i],
+                               problemtype,
+                               epilogue[scalar_i].pimpl->scaling_a_type
+                                       != RocblasltContractionProblem::ScalingFormat::None
+                                   || epilogue[scalar_i].pimpl->scaling_b_type
+                                          != RocblasltContractionProblem::ScalingFormat::None);
+            if(status != HIPBLAS_STATUS_SUCCESS)
+                return status;
+        }
+        auto scalar_status = scalar_publish(m_handle, scalar_state, m_data, m_gemm_count);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            m_problem_types = {problemtype};
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGroupedGemmSetProblemFullV2Cpp");
         std::vector<rocblaslt::RocGemmEpilogueV2> rocepilogue;
         for(auto& e : epilogue)
@@ -1272,6 +1709,43 @@ namespace hipblaslt_ext
                                             std::vector<void*>&                   D,
                                             std::vector<hipblasLtMatrixLayout_t>& matD)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        m_data.reset();
+        m_gemm_count            = 0;
+        const auto scalar_count = matmul_descr.size();
+        if(!scalar_count || alpha.size() != scalar_count || A.size() != scalar_count
+           || matA.size() != scalar_count || B.size() != scalar_count || matB.size() != scalar_count
+           || beta.size() != scalar_count || C.size() != scalar_count || matC.size() != scalar_count
+           || D.size() != scalar_count || matD.size() != scalar_count)
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        auto scalar_state = std::make_shared<ScalarInstance>();
+        scalar_state->problems.resize(scalar_count);
+        for(size_t scalar_i = 0; scalar_i < scalar_count; ++scalar_i)
+        {
+            auto status = scalar_clone(scalar_state->problems[scalar_i],
+                                       matmul_descr[scalar_i],
+                                       alpha[scalar_i],
+                                       A[scalar_i],
+                                       matA[scalar_i],
+                                       B[scalar_i],
+                                       matB[scalar_i],
+                                       beta[scalar_i],
+                                       C[scalar_i],
+                                       matC[scalar_i],
+                                       D[scalar_i],
+                                       matD[scalar_i]);
+            if(status != HIPBLAS_STATUS_SUCCESS)
+                return status;
+        }
+        auto scalar_status = scalar_publish(m_handle, scalar_state, m_data, m_gemm_count);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+        {
+            m_problem_types.clear();
+            for(auto& p : scalar_state->problems)
+                m_problem_types.push_back(scalar_problem_type(p));
+        }
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGroupedGemmSetProblemCAPICpp");
         auto matmul_descr_groupedGemm
             = reinterpret_cast<std::vector<rocblaslt_matmul_desc>*>(&matmul_descr);
@@ -1323,6 +1797,9 @@ namespace hipblaslt_ext
     HIPBLASLT_EXPORT hipblasStatus_t
         GroupedGemm::getDefaultValueForDeviceUserArguments(void* hostDeviceUserArgs)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return HIPBLAS_STATUS_NOT_SUPPORTED;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGroupedGemmGetDefaultUserArgsCpp");
         auto gemmType = static_cast<rocblaslt::RocGemmType>(m_gemm_type);
         auto status   = RocBlasLtStatusToHIPStatus(rocblaslt_get_default_user_args(
@@ -1333,6 +1810,9 @@ namespace hipblaslt_ext
 
     HIPBLASLT_EXPORT hipblasStatus_t GroupedGemm::run(void* deviceUserArgs, hipStream_t stream)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return HIPBLAS_STATUS_NOT_SUPPORTED;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGroupedGemmRunCpp");
         if(m_gemm_count == 0)
         {
@@ -1358,6 +1838,12 @@ namespace hipblaslt_ext
                                           size_t&                 workspaceSizeInBytes)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        workspaceSizeInBytes = 0;
+        if(!alpha || !beta || !gfx1013_scalar::is_algo(algo))
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        return gfx1013_scalar::supported(handle, matmulDesc, Adesc, Bdesc, Cdesc, Ddesc);
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtMatMulIsAlgoSupportedCpp");
         auto status = RocBlasLtStatusToHIPStatus(
             rocblaslt_matmul_is_algo_supported((rocblaslt_handle)handle,
@@ -1401,6 +1887,39 @@ namespace hipblaslt_ext
                                 std::vector<hipblasLtMatmulHeuristicResult_t>& heuristicResults)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        heuristicResults.clear();
+        if(typeGemm != GemmType::HIPBLASLT_GEMM && typeGemm != GemmType::HIPBLASLT_GROUPED_GEMM)
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        ScalarProblem   scalar_problem;
+        GemmProblemType scalar_type(opA, opB, typeA, typeB, typeC, typeD, typeCompute);
+        GemmEpilogue    scalar_epilogue;
+        GemmInputs      scalar_inputs;
+        const float     scalar_alpha = 1, scalar_beta = 0;
+        scalar_inputs.setAlpha(&scalar_alpha);
+        scalar_inputs.setBeta(&scalar_beta);
+        auto scalar_status = scalar_typed(scalar_problem,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          1,
+                                          scalar_epilogue,
+                                          scalar_inputs,
+                                          scalar_type);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            scalar_status = scalar_check(handle, scalar_problem);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            heuristicResults.push_back(gfx1013_scalar::algorithm());
+        return scalar_status;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGetAllAlgosCpp");
         auto results
             = reinterpret_cast<std::vector<rocblaslt_matmul_heuristic_result>*>(&heuristicResults);
@@ -1433,12 +1952,18 @@ namespace hipblaslt_ext
 
     std::string getSolutionNameFromAlgo(hipblasLtHandle_t handle, hipblasLtMatmulAlgo_t& algo)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return handle && gfx1013_scalar::is_algo(algo) ? "gfx1013_scalar_fma_16x16" : "";
+#endif
         auto rocalgo = reinterpret_cast<const rocblaslt_matmul_algo*>(&algo);
         return rocblaslt_get_solution_name_from_algo((rocblaslt_handle)handle, *rocalgo);
     }
 
     std::string getKernelNameFromAlgo(hipblasLtHandle_t handle, hipblasLtMatmulAlgo_t& algo)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return handle && gfx1013_scalar::is_algo(algo) ? "gfx1013_scalar_fma_16x16" : "";
+#endif
         auto rocalgo = reinterpret_cast<const rocblaslt_matmul_algo*>(&algo);
         return rocblaslt_get_kernel_name_from_algo((rocblaslt_handle)handle, *rocalgo);
     }
@@ -1449,6 +1974,18 @@ namespace hipblaslt_ext
                           std::vector<hipblasLtMatmulHeuristicResult_t>& heuristicResults)
     try
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        heuristicResults.clear();
+        auto scalar_algo  = gfx1013_scalar::algorithm();
+        int  scalar_index = 0;
+        std::memcpy(&scalar_index, scalar_algo.algo.data, sizeof(scalar_index));
+        if(!handle)
+            return HIPBLAS_STATUS_NOT_INITIALIZED;
+        for(auto index : algoIndex)
+            if(index == scalar_index)
+                heuristicResults.push_back(scalar_algo);
+        return HIPBLAS_STATUS_SUCCESS;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtGetAlgosFromIndexCpp");
         auto results
             = reinterpret_cast<std::vector<rocblaslt_matmul_heuristic_result>*>(&heuristicResults);
@@ -1479,6 +2016,9 @@ namespace hipblaslt_ext
                       hipblasLtMatrixLayout_t Cdesc,
                       hipblasLtMatrixLayout_t Ddesc)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        return 0;
+#endif
         rocblaslt::Debug::Instance().markerStart("hipblasLtMatmulIsTunedCpp");
         auto status = rocblaslt_matmul_is_tuned((rocblaslt_handle)handle,
                                                 (rocblaslt_matmul_desc)matmulDesc,
@@ -1508,6 +2048,26 @@ namespace hipblaslt_ext
                                          size_t*                            workspaceSize,
                                          int*                               returnAlgoCount)
     {
+#if HIPBLASLT_ENABLE_GFX1013_SCALAR
+        if(!heuristicResultsArray || !returnAlgoCount)
+            return HIPBLAS_STATUS_INVALID_VALUE;
+        size_t scalar_workspace = 0;
+        auto   scalar_status    = matmulIsAlgoSupported(handle,
+                                                        matmulDesc,
+                                                        alpha,
+                                                        matA,
+                                                        matB,
+                                                        beta,
+                                                        matC,
+                                                        matD,
+                                                        heuristicResultsArray[0].algo,
+                                                        scalar_workspace);
+        if(scalar_status == HIPBLAS_STATUS_SUCCESS)
+            ++*returnAlgoCount;
+        if(workspaceSize)
+            *workspaceSize = scalar_workspace;
+        return scalar_status;
+#endif
         if(heuristicResultsArray[0].algo.data[0] != 0)
         {
             rocblaslt_status status = rocblaslt_matmul_is_algo_supported((rocblaslt_handle)handle,

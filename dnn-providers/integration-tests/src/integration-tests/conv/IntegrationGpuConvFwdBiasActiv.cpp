@@ -25,7 +25,7 @@ using ConvFwdBiasActivTestCase = std::tuple<TensorLayout,
                                             bool,
                                             test_activation_common::ActivTestCase>;
 
-template <typename DataType>
+template <typename DataType, bool HomogeneousIntermediates = false>
 class ConvFwdBiasActiv
     : public IntegrationGraphVerificationHarness<DataType, ConvFwdBiasActivTestCase>
 {
@@ -44,7 +44,9 @@ public:
         graphObj.set_name(doBias ? "ConvFwdBiasActivTest" : "ConvFwdActivTest");
 
         auto dataType = getDataTypeEnumFromType<DataType>();
-        graphObj.set_intermediate_data_type(hipdnn_frontend::DataType::FLOAT)
+        graphObj
+            .set_intermediate_data_type(HomogeneousIntermediates ? dataType
+                                                                 : hipdnn_frontend::DataType::FLOAT)
             .set_compute_data_type(hipdnn_frontend::DataType::FLOAT)
             .set_io_data_type(dataType);
 
@@ -154,7 +156,49 @@ using IntegrationGpuConvFwdBiasActiv3dFp32 = ConvFwdBiasActiv<float>;
 using IntegrationGpuConvFwdBiasActiv3dBfp16 = ConvFwdBiasActiv<bfloat16>;
 using IntegrationGpuConvFwdBiasActiv3dFp16 = ConvFwdBiasActiv<half>;
 
+// These graphs explicitly request rounding into the IO storage type between
+// operations. Keep the existing FP32-intermediate fixtures unchanged.
+using IntegrationGpuConvFwdBiasActivHomogeneous2dFp16 = ConvFwdBiasActiv<half, true>;
+using IntegrationGpuConvFwdBiasActivHomogeneous2dBfp16 = ConvFwdBiasActiv<bfloat16, true>;
+
+std::vector<ConvFwdBiasActivTestCase> homogeneousFusionCases()
+{
+    using PointwiseMode = hipdnn_flatbuffers_sdk::data_objects::PointwiseMode;
+    const test_conv_common::ConvTestCase conv(
+        {1, 4, 7, 9}, {6, 4, 3, 3}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, 10131704);
+    std::vector<ConvFwdBiasActivTestCase> cases;
+    for(const auto& layout : {TensorLayout::NCHW, TensorLayout::NHWC})
+    {
+        cases.emplace_back(
+            layout, conv, true, test_activation_common::ActivTestCase(PointwiseMode::RELU_FWD));
+        cases.emplace_back(
+            layout,
+            conv,
+            true,
+            test_activation_common::ActivTestCase(PointwiseMode::RELU_FWD, std::nullopt, 0.75f));
+    }
+    return cases;
+}
+
 } // namespace
+
+TEST_P(IntegrationGpuConvFwdBiasActivHomogeneous2dFp16, Correctness)
+{
+    runGraphTest();
+}
+
+TEST_P(IntegrationGpuConvFwdBiasActivHomogeneous2dBfp16, Correctness)
+{
+    runGraphTest();
+}
+
+INSTANTIATE_TEST_SUITE_P(HomogeneousSmoke,
+                         IntegrationGpuConvFwdBiasActivHomogeneous2dFp16,
+                         testing::ValuesIn(homogeneousFusionCases()));
+
+INSTANTIATE_TEST_SUITE_P(HomogeneousSmoke,
+                         IntegrationGpuConvFwdBiasActivHomogeneous2dBfp16,
+                         testing::ValuesIn(homogeneousFusionCases()));
 
 // 2D tests
 GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(IntegrationGpuConvFwdBiasActiv2dFp32);

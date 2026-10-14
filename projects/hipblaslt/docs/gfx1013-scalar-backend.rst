@@ -25,6 +25,12 @@ Supported operations
   not read A or B. K=0 scales C without reading A or B.
 * Explicit heuristic algorithms or a null algorithm for implicit selection.
   The scalar kernel needs no workspace and executes on the supplied HIP stream.
+* Bias, ReLU, GELU, fixed-beta-one Swish, sigmoid, clamp and applicable bias
+  combinations. Clamp uses the supplied activation bounds. GELU/clamp auxiliary
+  outputs and DGELU are supported with column-major auxiliary storage.
+* Native C++ Gemm/GroupedGemm host-problem APIs, owning descriptor clones and
+  host scalar snapshots, heuristic/support/index queries and stream/event execution.
+* Matching FP16/BF16 FAST compute aliases use FP32 scalar accumulation.
 * Bias, ReLU, GELU and their bias combinations. Bias follows logical output rows;
   output-type or FP32 bias supports broadcast or padded batch strides.
 
@@ -35,9 +41,9 @@ This is a correctness-oriented scalar FMA implementation using 16x16 shared
 memory tiles. It does not claim performance parity with optimized BLAS kernels.
 Matrix instructions are not emitted because gfx1013 has neither MFMA nor WMMA.
 
-Auxiliary/backward epilogues, scaling pointers, auxiliary outputs, FP8/INT8/FP64, pointer-array
-batches, packed layouts, C leading-dimension-zero broadcasting, grouped GEMM
-and C++ extension algorithm enumeration are unsupported. Non-default SM-count,
+Bias-gradient and packed-ReLU auxiliary epilogues, scaling pointers, FP8/INT8/FP64,
+pointer-array batches, device user-argument grouped execution, packed layouts and
+C leading-dimension-zero broadcasting are unsupported. Non-default SM-count,
 Stream-K and search/configuration controls are rejected rather than ignored.
 Numerics-scanner requests are also unsupported. The handle must belong to the
 current gfx1013 device. Matrix dimensions and leading dimensions are bounded by

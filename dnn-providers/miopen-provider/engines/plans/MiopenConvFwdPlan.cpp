@@ -17,16 +17,19 @@ ConvFwdParams::ConvFwdParams(
     const std::unordered_map<int64_t,
                              const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes*>&
         tensorMap,
-    bool deterministicEnabled)
+    bool deterministicEnabled,
+    std::optional<int64_t> outputUid)
     : _spatialDimCount(miopen_utils::getSpatialDimCount(
           miopen_utils::findTensorAttributes(tensorMap, attributes.x_tensor_uid())))
     , _unpaddedWDimCount(
           miopen_utils::findTensorAttributes(tensorMap, attributes.w_tensor_uid()).dims()->size())
-    , _unpaddedYDimCount(
-          miopen_utils::findTensorAttributes(tensorMap, attributes.y_tensor_uid()).dims()->size())
+    , _unpaddedYDimCount(miopen_utils::findTensorAttributes(
+                             tensorMap, outputUid.value_or(attributes.y_tensor_uid()))
+                             .dims()
+                             ->size())
     , _x(miopen_utils::createPaddedTensor(tensorMap, attributes.x_tensor_uid()))
     , _w(miopen_utils::createPaddedTensor(tensorMap, attributes.w_tensor_uid()))
-    , _y(miopen_utils::createPaddedTensor(tensorMap, attributes.y_tensor_uid()))
+    , _y(miopen_utils::createPaddedTensor(tensorMap, outputUid.value_or(attributes.y_tensor_uid())))
 {
     const auto& attrX = miopen_utils::findTensorAttributes(tensorMap, _x.uid());
     const auto& attrW = miopen_utils::findTensorAttributes(tensorMap, _w.uid());

@@ -17,7 +17,8 @@ template <typename InputType_,
           index_t IssuesPerCol_     = 2,    // issue along col, to make sure block_reduce() OK
           index_t BytesPerIssue_    = sizeof(InputType_),
           index_t LaunchType_       = 0, // 0-streaming, >0, persistent #occupancy
-          index_t BlockSize_        = 256>
+          index_t BlockSize_        = 256,
+          bool ApplyActivation_     = true>
 struct TopkSoftmaxWarpPerRowProblem
 {
     // TODO: this kernel only support warp per row
@@ -33,6 +34,7 @@ struct TopkSoftmaxWarpPerRowProblem
     static constexpr index_t WarpSize      = get_warp_size();
 
     static constexpr bool ActivationIsSoftmax = ActivationIsSoftmax_;
+    static constexpr bool ApplyActivation     = ApplyActivation_;
 
     static_assert(BytesPerIssue % sizeof(InputType) == 0);
     static constexpr index_t VectorSize = BytesPerIssue / sizeof(InputType);

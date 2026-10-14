@@ -74,6 +74,48 @@ TEST(TestConvFwdBiasActivParams, InitializeFromValidConvFwdBiasActivGraph)
     const ConvFwdBiasActivParams params(*convAttr, biasAttr, *activAttr, graph.getTensorMap());
 }
 
+TEST(TestConvFwdBiasActivParams, SequentialConvolutionUsesNonVirtualFinalOutput)
+{
+    auto builder = createValidConvFwdBiasActivGraph();
+    const hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper graph(
+        builder.GetBufferPointer(), builder.GetSize());
+    const auto* conv = graph.getNode(0).attributes_as_ConvolutionFwdAttributes();
+    const auto* bias = graph.getNode(1).attributes_as_PointwiseAttributes();
+    const auto* activation = graph.getNode(2).attributes_as_PointwiseAttributes();
+    ConvFwdBiasActivParams params(*conv, bias, *activation, graph.getTensorMap());
+    auto sequential = params.takeSequentialConvolutionParams();
+    ASSERT_NE(sequential, nullptr);
+    EXPECT_TRUE(sequential->validTensors());
+    EXPECT_EQ(sequential->y().uid(), activation->out_0_tensor_uid());
+    EXPECT_NE(sequential->y().uid(), conv->y_tensor_uid());
+}
+
+TEST(TestConvFwdBiasActivParams, SequentialConvolutionRejectsDifferentIntermediateStorage)
+{
+    auto original = createValidConvFwdBiasActivGraph();
+    const hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper originalGraph(
+        original.GetBufferPointer(), original.GetSize());
+    std::unique_ptr<GraphT> native(originalGraph.getGraph().UnPack());
+    // Retaining a different virtual type would require a real intermediate
+    // buffer. It must not be optimized into the final output by this fallback.
+    for(auto& tensor : native->tensors)
+    {
+        if(tensor->virtual_)
+        {
+            tensor->data_type = DataType::HALF;
+        }
+    }
+    flatbuffers::FlatBufferBuilder builder;
+    builder.Finish(Graph::Pack(builder, native.get()));
+    const hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper graph(
+        builder.GetBufferPointer(), builder.GetSize());
+    const auto* conv = graph.getNode(0).attributes_as_ConvolutionFwdAttributes();
+    const auto* bias = graph.getNode(1).attributes_as_PointwiseAttributes();
+    const auto* activation = graph.getNode(2).attributes_as_PointwiseAttributes();
+    ConvFwdBiasActivParams params(*conv, bias, *activation, graph.getTensorMap());
+    EXPECT_EQ(params.takeSequentialConvolutionParams(), nullptr);
+}
+
 TEST(TestConvFwdBiasActivParams, PadsOneDimensionalGraphToTwoDimensions)
 {
     // The fused path builds its bias descriptor through its own

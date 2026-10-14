@@ -5,6 +5,14 @@
 
 namespace gfx1013_scalar
 {
+    bool                             is_algo(const hipblasLtMatmulAlgo_t&);
+    hipblasLtMatmulHeuristicResult_t algorithm();
+    hipblasStatus_t                  supported(hipblasLtHandle_t,
+                                               hipblasLtMatmulDesc_t,
+                                               hipblasLtMatrixLayout_t,
+                                               hipblasLtMatrixLayout_t,
+                                               hipblasLtMatrixLayout_t,
+                                               hipblasLtMatrixLayout_t);
     hipblasStatus_t heuristic(hipblasLtHandle_t,
                               hipblasLtMatmulDesc_t,
                               hipblasLtMatrixLayout_t,

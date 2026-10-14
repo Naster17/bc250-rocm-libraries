@@ -17,6 +17,8 @@
 #include "HipdnnMiopenHandle.hpp"
 #include "HipdnnMiopenSettings.hpp"
 #include "MiopenConvDescriptor.hpp"
+#include "MiopenConvFwdPlan.hpp"
+#include "MiopenGfx1013Pointwise.hpp"
 #include "MiopenTensor.hpp"
 #include "MiopenUtils.hpp"
 
@@ -46,6 +48,8 @@ public:
     const std::optional<MiopenTensor>& bias() const;
     const miopen_utils::ActivationParams& activParams() const;
     const MiopenTensor& y() const;
+    std::unique_ptr<ConvFwdParams> takeSequentialConvolutionParams();
+    const std::optional<Gfx1013PointwiseDescriptor>& pointwiseDescriptor() const;
 
 private:
     size_t _spatialDimCount;
@@ -55,6 +59,8 @@ private:
     std::optional<MiopenTensor> _bias;
     miopen_utils::ActivationParams _activParams;
     MiopenTensor _y;
+    std::unique_ptr<ConvFwdParams> _sequentialConvolutionParams;
+    std::optional<Gfx1013PointwiseDescriptor> _pointwiseDescriptor;
 };
 
 class ConvFwdBiasActivPlan : public hipdnn_plugin_sdk::IPlan<HipdnnMiopenHandle>
@@ -85,6 +91,8 @@ private:
     hipdnn_data_sdk::utilities::ScopedResource<miopenFusionPlanDescriptor_t> _fusePlanDesc;
     size_t _workspaceSize = 0;
     HipdnnMiopenSettings _executionSettings;
+    std::unique_ptr<ConvFwdPlan> _sequentialConvolution;
+    hipdnn_data_sdk::utilities::ScopedResource<miopenActivationDescriptor_t> _activationDesc;
 };
 
 } // namespace miopen_plugin

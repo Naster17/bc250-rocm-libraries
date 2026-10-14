@@ -154,7 +154,8 @@ auto create_args(int argc, char* argv[])
         .insert("repeat", "20", "number of iterations to benchmark the kernel")
         .insert("json", "0", "0: No Json, 1: Dump Results in Json format")
         .insert("jsonfile", "topk_softmax.json", "json file name to dump results")
-        .insert("activation", "softmax", "activation function to use: softmax or sigmoid");
+        .insert(
+            "activation", "softmax", "activation function to use: softmax, sigmoid or identity");
 
     bool result = arg_parser.parse(argc, argv);
     return std::make_tuple(result, arg_parser);
@@ -280,6 +281,11 @@ bool test_topk_softmax(ck_tile::ArgParser args)
             reference_topk_sigmoid<InputType, WeightType, IndexType>(
                 x_host, value_ref, index_ref, topk);
         }
+        else if(activation == "identity")
+        {
+            auto x_fp32 = x_host.template CopyAsType<float>();
+            reference_topk(x_fp32, value_ref, index_ref, topk);
+        }
         else
         {
             throw std::runtime_error("unsupported activation type: " + activation);
@@ -350,5 +356,14 @@ int main(int argc, char** argv)
         r &= test_topk_softmax<ck_tile::bf16_t, float, ck_tile::index_t>(args);
     }
 
+    else if(input_prec == "fp32" && weight_prec == "fp32")
+    {
+        r &= test_topk_softmax<float, float, ck_tile::index_t>(args);
+    }
+    else
+    {
+        std::cerr << "Unsupported input/output precision\n";
+        return -1;
+    }
     return r ? 0 : -1;
 }

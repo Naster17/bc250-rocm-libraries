@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "MiopenApi.hpp"
 #include <hipdnn_flatbuffers_sdk/data_objects/convolution_fwd_attributes_generated.h>
@@ -28,7 +29,8 @@ public:
         const std::unordered_map<int64_t,
                                  const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes*>&
             tensorMap,
-        bool deterministicEnabled = false);
+        bool deterministicEnabled = false,
+        std::optional<int64_t> outputUid = std::nullopt);
 
     ConvFwdParams(const ConvFwdParams&) = delete;
     ConvFwdParams& operator=(const ConvFwdParams&) = delete;

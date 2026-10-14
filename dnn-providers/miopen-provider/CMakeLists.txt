@@ -62,6 +62,11 @@ if(DEFINED HIP_DNN_SKIP_TESTS)
 endif()
 option(MIOPENPROVIDER_SKIP_TESTS "Skip building tests" OFF)
 option(MIOPENPROVIDER_ENABLE_COVERAGE "Build with code coverage flags" OFF)
+option(MIOPENPROVIDER_GFX1013_SCALAR "Enable native gfx1013 FP16/BF16 pointwise fallback" OFF)
+if(MIOPENPROVIDER_GFX1013_SCALAR)
+    set(CMAKE_HIP_ARCHITECTURES gfx1013)
+    enable_language(HIP)
+endif()
 
 option(BUILD_ADDRESS_SANITIZER "Build with Address Sanitizer enabled" OFF)
 option(ENABLE_CLANG_FORMAT "Enable Clang-Format checks" ON)
@@ -237,6 +242,11 @@ target_include_directories(miopen_plugin_impl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(miopen_plugin_impl PUBLIC ${MIOPEN_PROVIDER_MIOPEN_LIB} hipdnn_data_sdk hipdnn_flatbuffers_sdk hipdnn_plugin_sdk)
 
 target_compile_definitions(miopen_plugin_impl PUBLIC MIOPEN_BETA_API)
+if(MIOPENPROVIDER_GFX1013_SCALAR)
+    target_sources(miopen_plugin_impl PRIVATE engines/plans/MiopenGfx1013Pointwise.hip)
+    target_compile_definitions(miopen_plugin_impl PRIVATE MIOPENPROVIDER_GFX1013_SCALAR=1)
+    set_property(TARGET miopen_plugin_impl PROPERTY HIP_STANDARD 17)
+endif()
 # When linking the private implementation library, force-include the symbol-rename
 # header so the provider's public C API calls bind the _impl entry points exported
 # by libMIOpen_private.so. This mirrors how MIOpen_private itself is built (a

@@ -21,13 +21,29 @@ namespace gfx1013_scalar
         bool uses_bias(rocblaslt_epilogue epilogue)
         {
             return epilogue == ROCBLASLT_EPILOGUE_BIAS || epilogue == ROCBLASLT_EPILOGUE_RELU_BIAS
-                   || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS;
+                   || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS
+                   || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS
+                   || epilogue == ROCBLASLT_EPILOGUE_SWISH_BIAS_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_BIAS_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT;
+        }
+
+        bool uses_aux(rocblaslt_epilogue epilogue)
+        {
+            return epilogue == ROCBLASLT_EPILOGUE_GELU_AUX
+                   || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS
+                   || epilogue == ROCBLASLT_EPILOGUE_DGELU
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT;
         }
 
         bool supported_epilogue(rocblaslt_epilogue epilogue)
         {
             return epilogue == ROCBLASLT_EPILOGUE_DEFAULT || uses_bias(epilogue)
-                   || epilogue == ROCBLASLT_EPILOGUE_RELU || epilogue == ROCBLASLT_EPILOGUE_GELU;
+                   || epilogue == ROCBLASLT_EPILOGUE_RELU || epilogue == ROCBLASLT_EPILOGUE_GELU
+                   || uses_aux(epilogue) || epilogue == ROCBLASLT_EPILOGUE_SIGMOID
+                   || epilogue == ROCBLASLT_EPILOGUE_SWISH_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_EXT;
         }
 
         struct Layout
@@ -90,7 +106,8 @@ namespace gfx1013_scalar
                 return HIPBLAS_STATUS_ARCH_MISMATCH;
             if(!supported_epilogue(op->epilogue) || (!uses_bias(op->epilogue) && op->bias)
                || op->scaleA || op->scaleB || op->scaleC || op->scaleD || op->scaleE || op->amaxD
-               || op->e || op->scaleAType != RocblasltContractionProblem::ScalingFormat::None
+               || (!uses_aux(op->epilogue) && op->e)
+               || op->scaleAType != RocblasltContractionProblem::ScalingFormat::None
                || op->scaleBType != RocblasltContractionProblem::ScalingFormat::None
                || op->compute_input_typeA != HIPBLASLT_DATATYPE_INVALID
                || op->compute_input_typeB != HIPBLASLT_DATATYPE_INVALID
@@ -98,7 +115,11 @@ namespace gfx1013_scalar
                || op->streamk_tile_scheduling_ext
                || h->check_numerics != hipblaslt_check_numerics_mode_no_check
                || (op->compute_type_original != rocblaslt_compute_f32
-                   && op->compute_type_original != rocblaslt_compute_f32_pedantic)
+                   && op->compute_type_original != rocblaslt_compute_f32_pedantic
+                   && !(op->compute_type_original == rocblaslt_compute_f32_fast_f16
+                        && a->type == HIP_R_16F)
+                   && !(op->compute_type_original == rocblaslt_compute_f32_fast_bf16
+                        && a->type == HIP_R_16BF))
                || (op->pointermode != rocblaslt_pointer_mode_host
                    && op->pointermode != rocblaslt_pointer_mode_device))
                 return HIPBLAS_STATUS_NOT_SUPPORTED;
@@ -123,7 +144,22 @@ namespace gfx1013_scalar
                 if(bias_type != d->type && bias_type != HIP_R_32F)
                     return HIPBLAS_STATUS_NOT_SUPPORTED;
             }
-            else if(op->bias_stride)
+            if(uses_aux(op->epilogue))
+            {
+                // Upstream auxiliary tensors are column-major, even for row-major D.
+                const auto aux_type
+                    = op->aux_type == HIPBLASLT_DATATYPE_INVALID ? d->type : op->aux_type;
+                if(aux_type != d->type && aux_type != HIP_R_32F)
+                    return HIPBLAS_STATUS_NOT_SUPPORTED;
+                _rocblaslt_matrix_layout aux = *d;
+                aux.order                    = HIPBLASLT_ORDER_COL;
+                aux.ld                       = op->lde;
+                aux.batch_stride             = op->stride_e;
+                aux.batch_offset             = 0;
+                if(!op->e || !valid_span(aux, op->epilogue != ROCBLASLT_EPILOGUE_DGELU))
+                    return HIPBLAS_STATUS_INVALID_VALUE;
+            }
+            if(!uses_bias(op->epilogue) && op->bias_stride)
                 return HIPBLAS_STATUS_NOT_SUPPORTED;
             for(auto x : {a, b, c, d})
             {
@@ -166,7 +202,13 @@ namespace gfx1013_scalar
                              const void*        bias,
                              hipDataType        bias_type,
                              uint64_t           bias_stride,
-                             rocblaslt_epilogue epilogue)
+                             rocblaslt_epilogue epilogue,
+                             void*              aux,
+                             hipDataType        aux_type,
+                             uint64_t           aux_ld,
+                             uint64_t           aux_stride,
+                             float              act0,
+                             float              act1)
         {
             __shared__ float left[tile][tile];
             __shared__ float right[tile][tile];
@@ -214,10 +256,54 @@ namespace gfx1013_scalar
                     else
                         value += float(static_cast<const hip_bfloat16*>(bias)[index]);
                 }
-                if(epilogue == ROCBLASLT_EPILOGUE_RELU || epilogue == ROCBLASLT_EPILOGUE_RELU_BIAS)
+                const uint64_t aux_index = batch * aux_stride + col * aux_ld + row;
+                if(epilogue == ROCBLASLT_EPILOGUE_GELU_AUX
+                   || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT)
+                {
+                    if(aux_type == HIP_R_32F)
+                        static_cast<float*>(aux)[aux_index] = value;
+                    else if(aux_type == HIP_R_16F)
+                        static_cast<__half*>(aux)[aux_index] = __half(value);
+                    else
+                        static_cast<hip_bfloat16*>(aux)[aux_index] = hip_bfloat16(value);
+                }
+                if(epilogue == ROCBLASLT_EPILOGUE_CLAMP_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_BIAS_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_EXT
+                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT)
+                    value = fmaxf(act0, fminf(value, act1));
+                else if(epilogue == ROCBLASLT_EPILOGUE_DGELU)
+                {
+                    const float x = aux_type == HIP_R_32F ? static_cast<float*>(aux)[aux_index]
+                                    : aux_type == HIP_R_16F
+                                        ? float(static_cast<__half*>(aux)[aux_index])
+                                        : float(static_cast<hip_bfloat16*>(aux)[aux_index]);
+                    const float t = tanhf(0.7978845608028654f * x * (1 + 0.044715f * x * x));
+                    value *= 0.5f * (1 + t)
+                             + 0.3989422804014327f * x * (1 + 0.134145f * x * x) * (1 - t * t);
+                }
+                else if(epilogue == ROCBLASLT_EPILOGUE_SIGMOID
+                        || epilogue == ROCBLASLT_EPILOGUE_SWISH_EXT
+                        || epilogue == ROCBLASLT_EPILOGUE_SWISH_BIAS_EXT)
+                {
+                    // Stable sigmoid avoids infinity/overflow for large negative inputs.
+                    // The public SWISH_EXT epilogue is Swish(x, 1). Activation
+                    // arguments parameterize CLAMP; they do not change this beta.
+                    const float argument  = value;
+                    const float exp_value = expf(-fabsf(argument));
+                    const float sigmoid
+                        = argument >= 0 ? 1 / (1 + exp_value) : exp_value / (1 + exp_value);
+                    value = epilogue == ROCBLASLT_EPILOGUE_SIGMOID ? sigmoid : value * sigmoid;
+                }
+                else if(epilogue == ROCBLASLT_EPILOGUE_RELU
+                        || epilogue == ROCBLASLT_EPILOGUE_RELU_BIAS)
                     value = fmaxf(value, 0.0f);
                 else if(epilogue == ROCBLASLT_EPILOGUE_GELU
-                        || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS)
+                        || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS
+                        || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX
+                        || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS)
                 {
                     // Match the tanh approximation used by upstream activation kernels.
                     const float inner
@@ -252,7 +338,9 @@ namespace gfx1013_scalar
             const uint64_t k = op->op_A == HIPBLAS_OP_N ? a->n : a->m;
             if(!D || ((device || bh != 0) && !C) || (k && (device || ah != 0) && (!A || !B)))
                 return HIPBLAS_STATUS_INVALID_VALUE;
-            if(D == A || D == B || (op->bias && D == op->bias))
+            if(D == A || D == B || (op->bias && D == op->bias)
+               || (op->e
+                   && (op->e == D || op->e == A || op->e == B || op->e == C || op->e == op->bias)))
                 return HIPBLAS_STATUS_INVALID_VALUE;
             if(C == D
                && (c->ld != d->ld || c->batch_stride != d->batch_stride
@@ -281,10 +369,45 @@ namespace gfx1013_scalar
                 uses_bias(op->epilogue) ? op->bias : nullptr,
                 op->bias_type == HIPBLASLT_DATATYPE_INVALID ? d->type : op->bias_type,
                 uint64_t(op->bias_stride),
-                op->epilogue);
+                op->epilogue,
+                op->e,
+                op->aux_type == HIPBLASLT_DATATYPE_INVALID ? d->type : op->aux_type,
+                uint64_t(op->lde),
+                uint64_t(op->stride_e),
+                op->act0,
+                op->act1);
             return hipGetLastError() == hipSuccess ? HIPBLAS_STATUS_SUCCESS
                                                    : HIPBLAS_STATUS_EXECUTION_FAILED;
         }
+    }
+
+    bool is_algo(const hipblasLtMatmulAlgo_t& algo)
+    {
+        return !std::memcmp(algo.data, algorithm_id, sizeof(algorithm_id))
+               && !algo.max_workspace_bytes;
+    }
+
+    hipblasLtMatmulHeuristicResult_t algorithm()
+    {
+        hipblasLtMatmulHeuristicResult_t result{};
+        std::memcpy(result.algo.data, algorithm_id, sizeof(algorithm_id));
+        result.state = HIPBLAS_STATUS_SUCCESS;
+        return result;
+    }
+
+    hipblasStatus_t supported(hipblasLtHandle_t       handle,
+                              hipblasLtMatmulDesc_t   desc,
+                              hipblasLtMatrixLayout_t a,
+                              hipblasLtMatrixLayout_t b,
+                              hipblasLtMatrixLayout_t c,
+                              hipblasLtMatrixLayout_t d)
+    {
+        return validate(reinterpret_cast<rocblaslt_handle>(handle),
+                        reinterpret_cast<rocblaslt_matmul_desc>(desc),
+                        reinterpret_cast<rocblaslt_matrix_layout>(a),
+                        reinterpret_cast<rocblaslt_matrix_layout>(b),
+                        reinterpret_cast<rocblaslt_matrix_layout>(c ? c : d),
+                        reinterpret_cast<rocblaslt_matrix_layout>(d));
     }
 
     hipblasStatus_t heuristic(hipblasLtHandle_t                 handle,
