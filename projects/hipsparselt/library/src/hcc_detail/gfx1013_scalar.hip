@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 // Native gfx1013 fallback: ordinary scalar HIP instructions, host FP32 scalars,
-// strip/4x4 tile pruning, and no fusion. The compressed buffer is backend-specific:
+// strip/4x4 tile pruning, and scalar activation epilogues. The compressed buffer is backend-specific:
 // tightly packed retained values for each logical contraction row followed by
 // one byte per group containing two-bit indices. FP16/BF16 use 2:4, FP32 1:2.
 // Its orientation follows sparse A's rows or sparse B's columns after op().
@@ -42,6 +42,10 @@ namespace
         uint64_t             tag = multiply_tag;
         Matrix               a, b, c, d;
         hipsparseOperation_t opa, opb;
+        int                  activation = -1;
+        float                leakyAlpha = 0.01f;
+        float reluThreshold = 0.0f, reluUpper = std::numeric_limits<float>::infinity();
+        float geluScale = 1.0f, tanhAlpha = 1.0f, tanhBeta = 1.0f;
     };
     struct Algorithm
     {
@@ -53,6 +57,35 @@ namespace
         uint64_t tag = plan_tag;
         Multiply mm;
     };
+    bool activationAttribute(hipsparseLtMatmulDescAttribute_t attr)
+    {
+        return attr == HIPSPARSELT_MATMUL_ACTIVATION_RELU
+               || attr == HIPSPARSELT_MATMUL_ACTIVATION_ABS
+               || attr == HIPSPARSELT_MATMUL_ACTIVATION_LEAKYRELU
+               || attr == HIPSPARSELT_MATMUL_ACTIVATION_GELU
+               || attr == HIPSPARSELT_MATMUL_ACTIVATION_SIGMOID
+               || attr == HIPSPARSELT_MATMUL_ACTIVATION_TANH;
+    }
+    float* activationParameter(Multiply& mm, hipsparseLtMatmulDescAttribute_t attr)
+    {
+        switch(attr)
+        {
+        case HIPSPARSELT_MATMUL_ACTIVATION_RELU_THRESHOLD:
+            return &mm.reluThreshold;
+        case HIPSPARSELT_MATMUL_ACTIVATION_RELU_UPPERBOUND:
+            return &mm.reluUpper;
+        case HIPSPARSELT_MATMUL_ACTIVATION_LEAKYRELU_ALPHA:
+            return &mm.leakyAlpha;
+        case HIPSPARSELT_MATMUL_ACTIVATION_GELU_SCALING:
+            return &mm.geluScale;
+        case HIPSPARSELT_MATMUL_ACTIVATION_TANH_ALPHA:
+            return &mm.tanhAlpha;
+        case HIPSPARSELT_MATMUL_ACTIVATION_TANH_BETA:
+            return &mm.tanhBeta;
+        default:
+            return nullptr;
+        }
+    }
     static_assert(sizeof(Plan) <= sizeof(hipsparseLtMatmulPlan_t));
     static_assert(sizeof(Multiply) <= sizeof(hipsparseLtMatmulDescriptor_t));
     template <class T, class O>
@@ -395,6 +428,21 @@ namespace
         if(beta != 0)
             value += beta
                      * float(c[offset(mm.c, HIPSPARSE_OPERATION_NON_TRANSPOSE, row, col, batch)]);
+        if(mm.activation == HIPSPARSELT_MATMUL_ACTIVATION_RELU)
+            value
+                = value > mm.reluThreshold ? fminf(value, mm.reluUpper) : fminf(0.0f, mm.reluUpper);
+        else if(mm.activation == HIPSPARSELT_MATMUL_ACTIVATION_ABS)
+            value = fabsf(value);
+        else if(mm.activation == HIPSPARSELT_MATMUL_ACTIVATION_LEAKYRELU && value < 0)
+            value *= mm.leakyAlpha;
+        else if(mm.activation == HIPSPARSELT_MATMUL_ACTIVATION_GELU)
+            value = mm.geluScale * 0.5f * value
+                    * (1.0f
+                       + tanhf(0.7978845608028654f * value * (1.0f + 0.044715f * value * value)));
+        else if(mm.activation == HIPSPARSELT_MATMUL_ACTIVATION_SIGMOID)
+            value = value >= 0 ? 1.0f / (1.0f + expf(-value)) : expf(value) / (1.0f + expf(value));
+        else if(mm.activation == HIPSPARSELT_MATMUL_ACTIVATION_TANH)
+            value = tanhf(value * mm.tanhAlpha) * mm.tanhBeta;
         d[offset(mm.d, HIPSPARSE_OPERATION_NON_TRANSPOSE, row, col, batch)] = T(value);
     }
 
@@ -695,25 +743,69 @@ hipsparseStatus_t hipsparseLtMatmulDescriptorInit(const hipsparseLtHandle_t*    
     write(d, mm);
     return HIPSPARSE_STATUS_SUCCESS;
 }
-hipsparseStatus_t hipsparseLtMatmulDescSetAttribute(const hipsparseLtHandle_t*     h,
-                                                    hipsparseLtMatmulDescriptor_t* d,
-                                                    hipsparseLtMatmulDescAttribute_t,
-                                                    const void*,
-                                                    size_t)
+hipsparseStatus_t hipsparseLtMatmulDescSetAttribute(const hipsparseLtHandle_t*       h,
+                                                    hipsparseLtMatmulDescriptor_t*   d,
+                                                    hipsparseLtMatmulDescAttribute_t attr,
+                                                    const void*                      value,
+                                                    size_t                           bytes)
 {
     Multiply mm{};
-    return valid(h) && read(d, mm, multiply_tag) ? HIPSPARSE_STATUS_NOT_SUPPORTED
-                                                 : HIPSPARSE_STATUS_INVALID_VALUE;
+    if(!valid(h) || !read(d, mm, multiply_tag) || !value)
+        return HIPSPARSE_STATUS_INVALID_VALUE;
+    if(activationAttribute(attr))
+    {
+        if(bytes != sizeof(int))
+            return HIPSPARSE_STATUS_INVALID_VALUE;
+        int enabled;
+        std::memcpy(&enabled, value, bytes);
+        if(enabled != 0 && enabled != 1)
+            return HIPSPARSE_STATUS_INVALID_VALUE;
+        mm.activation = enabled ? int(attr) : -1;
+    }
+    else if(auto parameter = activationParameter(mm, attr))
+    {
+        if(bytes != sizeof(float))
+            return HIPSPARSE_STATUS_INVALID_VALUE;
+        float alpha;
+        std::memcpy(&alpha, value, bytes);
+        if(!std::isfinite(alpha)
+           && !(attr == HIPSPARSELT_MATMUL_ACTIVATION_RELU_UPPERBOUND
+                && alpha == std::numeric_limits<float>::infinity()))
+            return HIPSPARSE_STATUS_INVALID_VALUE;
+        *parameter = alpha;
+        if(attr == HIPSPARSELT_MATMUL_ACTIVATION_GELU_SCALING)
+            mm.activation = HIPSPARSELT_MATMUL_ACTIVATION_GELU;
+    }
+    else
+        return HIPSPARSE_STATUS_NOT_SUPPORTED;
+    write(d, mm);
+    return HIPSPARSE_STATUS_SUCCESS;
 }
 hipsparseStatus_t hipsparseLtMatmulDescGetAttribute(const hipsparseLtHandle_t*           h,
                                                     const hipsparseLtMatmulDescriptor_t* d,
-                                                    hipsparseLtMatmulDescAttribute_t,
-                                                    void*,
-                                                    size_t)
+                                                    hipsparseLtMatmulDescAttribute_t     attr,
+                                                    void*                                value,
+                                                    size_t                               bytes)
 {
     Multiply mm{};
-    return valid(h) && read(d, mm, multiply_tag) ? HIPSPARSE_STATUS_NOT_SUPPORTED
-                                                 : HIPSPARSE_STATUS_INVALID_VALUE;
+    if(!valid(h) || !read(d, mm, multiply_tag) || !value)
+        return HIPSPARSE_STATUS_INVALID_VALUE;
+    if(activationAttribute(attr))
+    {
+        if(bytes != sizeof(int))
+            return HIPSPARSE_STATUS_INVALID_VALUE;
+        int enabled = mm.activation == int(attr);
+        std::memcpy(value, &enabled, bytes);
+    }
+    else if(auto parameter = activationParameter(mm, attr))
+    {
+        if(bytes != sizeof(float))
+            return HIPSPARSE_STATUS_INVALID_VALUE;
+        std::memcpy(value, parameter, bytes);
+    }
+    else
+        return HIPSPARSE_STATUS_NOT_SUPPORTED;
+    return HIPSPARSE_STATUS_SUCCESS;
 }
 hipsparseStatus_t hipsparseLtMatmulAlgSelectionInit(const hipsparseLtHandle_t*           h,
                                                     hipsparseLtMatmulAlgSelection_t*     d,

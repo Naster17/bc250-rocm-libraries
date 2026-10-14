@@ -18,13 +18,16 @@ Implemented operations
 * Positive, equal batch counts with explicit nonoverlapping padded batch strides.
 * Host ``float`` alpha/beta, arbitrary valid leading dimensions, separate C/D
   layouts, and C/D aliasing when their layouts and batch strides match.
+* ReLU (including threshold/upper bound), ABS, LeakyReLU, GELU, Sigmoid
+  and Tanh activation epilogues on FP32/FP16/BF16;
+  descriptor attribute round trips and plan snapshots preserve the selected activation.
 * One algorithm (configuration 0), no workspace, and the caller's one HIP stream.
   Search executes this sole algorithm and blocks until its selected/default
   stream completes, without changing its configuration. Only one search
   iteration is accepted. Matmul remains asynchronous.
 
 The fallback rejects FP32 tile pruning, integer/FP8/TF32 compute modes, mixed matrix
-storage types, bias/activation/vector scaling, split-K, multiple streams, batch
+storage types, bias and vector scaling, split-K, multiple streams, batch
 broadcasting, multiple search iterations, and sparse/sparse multiplication. It does not silently ignore
 unsupported attributes. Descriptors use bounded positive dimensions to keep
 all index and launch products valid.
@@ -51,7 +54,7 @@ Qualification
 API against independent CPU magnitude pruning and double-precision dense GEMM,
 independently decodes compressed values/metadata, destroys the original sparse
 storage before GEMM, checks padding/buffer guards, and detects invalid sparsity.
-Its 162 cases cover strip/TILE pruning, independent mask enumeration, partial
+Its 234 cases cover strip/TILE pruning, independent mask enumeration, partial
 tiles, types, A/B sparsity, layouts, transposes and batches. GPU execution must be recorded separately from
 host/device compilation; passing syntax checks alone does not qualify runtime
 support.

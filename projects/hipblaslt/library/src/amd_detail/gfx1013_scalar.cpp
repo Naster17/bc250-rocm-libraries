@@ -183,7 +183,7 @@ namespace gfx1013_scalar
             return HIPBLAS_STATUS_SUCCESS;
         }
 
-        template <typename Input, typename Output>
+        template <typename Input, typename Output, unsigned Outputs = 1>
         __global__ void gemm(Layout             a,
                              Layout             b,
                              Layout             c,
@@ -210,111 +210,145 @@ namespace gfx1013_scalar
                              float              act0,
                              float              act1)
         {
-            __shared__ float left[tile][tile];
-            __shared__ float right[tile][tile];
-            const unsigned   x = threadIdx.x, y = threadIdx.y;
-            const uint64_t   tiles_m  = (d.rows + tile - 1) / tile;
-            const uint64_t   tiles_n  = (d.cols + tile - 1) / tile;
-            const uint64_t   batch    = uint64_t(blockIdx.x) / (tiles_m * tiles_n);
-            const uint64_t   position = uint64_t(blockIdx.x) % (tiles_m * tiles_n);
-            const uint64_t   row      = (position % tiles_m) * tile + y;
-            const uint64_t   col      = (position / tiles_m) * tile + x;
-            const float      alpha    = alpha_device ? *alpha_device : alpha_host;
-            const float      beta     = beta_device ? *beta_device : beta_host;
-            float            acc      = 0;
-            // Scalar arithmetic only: gfx1013 does not have MFMA or WMMA instructions.
+            // A register tile reuses each LDS load for Outputs rows and columns.
+            // Keep the original reduction order and FP32 FMA accumulation.
+            constexpr unsigned block_tile = tile * Outputs;
+            __shared__ float   left[block_tile][tile];
+            __shared__ float   right[tile][block_tile];
+            const unsigned     x = threadIdx.x, y = threadIdx.y;
+            const uint64_t     tiles_m                 = (d.rows + block_tile - 1) / block_tile;
+            const uint64_t     tiles_n                 = (d.cols + block_tile - 1) / block_tile;
+            const uint64_t     batch                   = uint64_t(blockIdx.x) / (tiles_m * tiles_n);
+            const uint64_t     position                = uint64_t(blockIdx.x) % (tiles_m * tiles_n);
+            const uint64_t     base_row                = (position % tiles_m) * block_tile;
+            const uint64_t     base_col                = (position / tiles_m) * block_tile;
+            const float        alpha                   = alpha_device ? *alpha_device : alpha_host;
+            const float        beta                    = beta_device ? *beta_device : beta_host;
+            float              accum[Outputs][Outputs] = {};
+            // Choose load lanes independently from output lanes so either storage
+            // order can read contiguous input values. All threads still reach barriers.
+            const bool a_rows = Outputs == 1 || a.row_major != trans_a;
+            const bool b_rows = Outputs == 1 || b.row_major != trans_b;
             if(alpha != 0)
                 for(uint64_t start = 0; start < k; start += tile)
                 {
-                    const uint64_t ak = start + x, bk = start + y;
-                    left[y][x]
-                        = row < d.rows && ak < k
-                              ? float(A[a.index(trans_a ? ak : row, trans_a ? row : ak, batch)])
-                              : 0;
-                    right[y][x]
-                        = col < d.cols && bk < k
-                              ? float(B[b.index(trans_b ? col : bk, trans_b ? bk : col, batch)])
-                              : 0;
+                    const unsigned ar = a_rows ? y : x, ac = a_rows ? x : y;
+                    const unsigned br = b_rows ? y : x, bc = b_rows ? x : y;
+#pragma unroll
+                    for(unsigned part = 0; part < Outputs; ++part)
+                    {
+                        const uint64_t row = base_row + part * tile + ar;
+                        const uint64_t col = base_col + part * tile + bc;
+                        const uint64_t ak = start + ac, bk = start + br;
+                        left[part * tile + ar][ac]
+                            = row < d.rows && ak < k
+                                  ? float(A[a.index(trans_a ? ak : row, trans_a ? row : ak, batch)])
+                                  : 0;
+                        right[br][part * tile + bc]
+                            = col < d.cols && bk < k
+                                  ? float(B[b.index(trans_b ? col : bk, trans_b ? bk : col, batch)])
+                                  : 0;
+                    }
                     __syncthreads();
                     for(unsigned i = 0; i < tile && start + i < k; ++i)
-                        acc = __builtin_fmaf(left[y][i], right[i][x], acc);
+                    {
+#pragma unroll
+                        for(unsigned r = 0; r < Outputs; ++r)
+#pragma unroll
+                            for(unsigned c = 0; c < Outputs; ++c)
+                                accum[r][c] = __builtin_fmaf(
+                                    left[r * tile + y][i], right[i][c * tile + x], accum[r][c]);
+                    }
                     __syncthreads();
                 }
-            if(row < d.rows && col < d.cols)
-            {
-                // BLAS beta=0 must not read C: uninitialised/NaN C is valid in this case.
-                const float value_c = beta == 0 ? 0 : float(C[c.index(row, col, batch)]);
-                float       value   = __builtin_fmaf(alpha, acc, beta * value_c);
-                if(bias)
+#pragma unroll
+            for(unsigned r = 0; r < Outputs; ++r)
+#pragma unroll
+                for(unsigned cpart = 0; cpart < Outputs; ++cpart)
                 {
-                    // Bias is indexed by logical D row, independent of storage order.
-                    const uint64_t index = batch * bias_stride + row;
-                    if(bias_type == HIP_R_32F)
-                        value += static_cast<const float*>(bias)[index];
-                    else if(bias_type == HIP_R_16F)
-                        value += float(static_cast<const __half*>(bias)[index]);
-                    else
-                        value += float(static_cast<const hip_bfloat16*>(bias)[index]);
+                    const uint64_t row = base_row + r * tile + y;
+                    const uint64_t col = base_col + cpart * tile + x;
+                    const float    acc = accum[r][cpart];
+                    if(row < d.rows && col < d.cols)
+                    {
+                        // BLAS beta=0 must not read C: uninitialised/NaN C is valid in this case.
+                        const float value_c = beta == 0 ? 0 : float(C[c.index(row, col, batch)]);
+                        float       value   = __builtin_fmaf(alpha, acc, beta * value_c);
+                        if(bias)
+                        {
+                            // Bias is indexed by logical D row, independent of storage order.
+                            const uint64_t index = batch * bias_stride + row;
+                            if(bias_type == HIP_R_32F)
+                                value += static_cast<const float*>(bias)[index];
+                            else if(bias_type == HIP_R_16F)
+                                value += float(static_cast<const __half*>(bias)[index]);
+                            else
+                                value += float(static_cast<const hip_bfloat16*>(bias)[index]);
+                        }
+                        const uint64_t aux_index = batch * aux_stride + col * aux_ld + row;
+                        if(epilogue == ROCBLASLT_EPILOGUE_GELU_AUX
+                           || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS
+                           || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_EXT
+                           || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT)
+                        {
+                            if(aux_type == HIP_R_32F)
+                                static_cast<float*>(aux)[aux_index] = value;
+                            else if(aux_type == HIP_R_16F)
+                                static_cast<__half*>(aux)[aux_index] = __half(value);
+                            else
+                                static_cast<hip_bfloat16*>(aux)[aux_index] = hip_bfloat16(value);
+                        }
+                        if(epilogue == ROCBLASLT_EPILOGUE_CLAMP_EXT
+                           || epilogue == ROCBLASLT_EPILOGUE_CLAMP_BIAS_EXT
+                           || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_EXT
+                           || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT)
+                            value = fmaxf(act0, fminf(value, act1));
+                        else if(epilogue == ROCBLASLT_EPILOGUE_DGELU)
+                        {
+                            const float x = aux_type == HIP_R_32F
+                                                ? static_cast<float*>(aux)[aux_index]
+                                            : aux_type == HIP_R_16F
+                                                ? float(static_cast<__half*>(aux)[aux_index])
+                                                : float(static_cast<hip_bfloat16*>(aux)[aux_index]);
+                            const float t
+                                = tanhf(0.7978845608028654f * x * (1 + 0.044715f * x * x));
+                            value *= 0.5f * (1 + t)
+                                     + 0.3989422804014327f * x * (1 + 0.134145f * x * x)
+                                           * (1 - t * t);
+                        }
+                        else if(epilogue == ROCBLASLT_EPILOGUE_SIGMOID
+                                || epilogue == ROCBLASLT_EPILOGUE_SWISH_EXT
+                                || epilogue == ROCBLASLT_EPILOGUE_SWISH_BIAS_EXT)
+                        {
+                            // Stable sigmoid avoids infinity/overflow for large negative inputs.
+                            // The public SWISH_EXT epilogue is Swish(x, 1). Activation
+                            // arguments parameterize CLAMP; they do not change this beta.
+                            const float argument  = value;
+                            const float exp_value = expf(-fabsf(argument));
+                            const float sigmoid
+                                = argument >= 0 ? 1 / (1 + exp_value) : exp_value / (1 + exp_value);
+                            value = epilogue == ROCBLASLT_EPILOGUE_SIGMOID ? sigmoid
+                                                                           : value * sigmoid;
+                        }
+                        else if(epilogue == ROCBLASLT_EPILOGUE_RELU
+                                || epilogue == ROCBLASLT_EPILOGUE_RELU_BIAS)
+                            value = fmaxf(value, 0.0f);
+                        else if(epilogue == ROCBLASLT_EPILOGUE_GELU
+                                || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS
+                                || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX
+                                || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS)
+                        {
+                            // Match the tanh approximation used by upstream activation kernels.
+                            const float inner
+                                = 0.7978845608028654f * value * (1.0f + 0.044715f * value * value);
+                            value = 0.5f * value * (1.0f + tanhf(inner));
+                        }
+                        D[d.index(row, col, batch)] = Output(value);
+                    }
                 }
-                const uint64_t aux_index = batch * aux_stride + col * aux_ld + row;
-                if(epilogue == ROCBLASLT_EPILOGUE_GELU_AUX
-                   || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS
-                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_EXT
-                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT)
-                {
-                    if(aux_type == HIP_R_32F)
-                        static_cast<float*>(aux)[aux_index] = value;
-                    else if(aux_type == HIP_R_16F)
-                        static_cast<__half*>(aux)[aux_index] = __half(value);
-                    else
-                        static_cast<hip_bfloat16*>(aux)[aux_index] = hip_bfloat16(value);
-                }
-                if(epilogue == ROCBLASLT_EPILOGUE_CLAMP_EXT
-                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_BIAS_EXT
-                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_EXT
-                   || epilogue == ROCBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT)
-                    value = fmaxf(act0, fminf(value, act1));
-                else if(epilogue == ROCBLASLT_EPILOGUE_DGELU)
-                {
-                    const float x = aux_type == HIP_R_32F ? static_cast<float*>(aux)[aux_index]
-                                    : aux_type == HIP_R_16F
-                                        ? float(static_cast<__half*>(aux)[aux_index])
-                                        : float(static_cast<hip_bfloat16*>(aux)[aux_index]);
-                    const float t = tanhf(0.7978845608028654f * x * (1 + 0.044715f * x * x));
-                    value *= 0.5f * (1 + t)
-                             + 0.3989422804014327f * x * (1 + 0.134145f * x * x) * (1 - t * t);
-                }
-                else if(epilogue == ROCBLASLT_EPILOGUE_SIGMOID
-                        || epilogue == ROCBLASLT_EPILOGUE_SWISH_EXT
-                        || epilogue == ROCBLASLT_EPILOGUE_SWISH_BIAS_EXT)
-                {
-                    // Stable sigmoid avoids infinity/overflow for large negative inputs.
-                    // The public SWISH_EXT epilogue is Swish(x, 1). Activation
-                    // arguments parameterize CLAMP; they do not change this beta.
-                    const float argument  = value;
-                    const float exp_value = expf(-fabsf(argument));
-                    const float sigmoid
-                        = argument >= 0 ? 1 / (1 + exp_value) : exp_value / (1 + exp_value);
-                    value = epilogue == ROCBLASLT_EPILOGUE_SIGMOID ? sigmoid : value * sigmoid;
-                }
-                else if(epilogue == ROCBLASLT_EPILOGUE_RELU
-                        || epilogue == ROCBLASLT_EPILOGUE_RELU_BIAS)
-                    value = fmaxf(value, 0.0f);
-                else if(epilogue == ROCBLASLT_EPILOGUE_GELU
-                        || epilogue == ROCBLASLT_EPILOGUE_GELU_BIAS
-                        || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX
-                        || epilogue == ROCBLASLT_EPILOGUE_GELU_AUX_BIAS)
-                {
-                    // Match the tanh approximation used by upstream activation kernels.
-                    const float inner
-                        = 0.7978845608028654f * value * (1.0f + 0.044715f * value * value);
-                    value = 0.5f * value * (1.0f + tanhf(inner));
-                }
-                D[d.index(row, col, batch)] = Output(value);
-            }
         }
 
-        template <typename Input, typename Output>
+        template <typename Input, typename Output, unsigned Outputs = 1>
         hipblasStatus_t launch(rocblaslt_matmul_desc   op,
                                rocblaslt_matrix_layout a,
                                rocblaslt_matrix_layout b,
@@ -346,11 +380,21 @@ namespace gfx1013_scalar
                && (c->ld != d->ld || c->batch_stride != d->batch_stride
                    || c->batch_offset != d->batch_offset))
                 return HIPBLAS_STATUS_INVALID_VALUE;
-            const uint64_t blocks = ((d->m + tile - 1) / tile) * ((d->n + tile - 1) / tile)
-                                    * uint64_t(d->batch_count);
+            if constexpr(Outputs == 1)
+            {
+                // Small/skinny problems retain the finer grid; larger matrices reuse
+                // four outputs per thread without changing the public algorithm ID.
+                if(d->m >= 128 && d->n >= 128)
+                    return launch<Input, Output, 2>(
+                        op, a, b, c, d, alpha, A, B, beta, C, D, stream);
+            }
+            constexpr unsigned block_tile = tile * Outputs;
+            const uint64_t     blocks     = ((d->m + block_tile - 1) / block_tile)
+                                            * ((d->n + block_tile - 1) / block_tile)
+                                            * uint64_t(d->batch_count);
             if(!blocks)
                 return HIPBLAS_STATUS_SUCCESS;
-            gemm<Input, Output><<<dim3(unsigned(blocks)), dim3(tile, tile), 0, stream>>>(
+            gemm<Input, Output, Outputs><<<dim3(unsigned(blocks)), dim3(tile, tile), 0, stream>>>(
                 layout(*a),
                 layout(*b),
                 layout(*c),

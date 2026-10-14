@@ -26,6 +26,7 @@
 #include "contraction_scalar.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <hip/hip_runtime.h>
 #include <limits>
 #include <map>
@@ -61,7 +62,14 @@ namespace hiptensor
         bool supportedOp(hiptensorOperator_t op)
         {
             return op == HIPTENSOR_OP_IDENTITY || op == HIPTENSOR_OP_NEG || op == HIPTENSOR_OP_ABS
-                   || op == HIPTENSOR_OP_RELU;
+                   || op == HIPTENSOR_OP_RELU || op == HIPTENSOR_OP_SQRT || op == HIPTENSOR_OP_RCP
+                   || op == HIPTENSOR_OP_SIGMOID || op == HIPTENSOR_OP_TANH
+                   || op == HIPTENSOR_OP_EXP || op == HIPTENSOR_OP_LOG || op == HIPTENSOR_OP_SIN
+                   || op == HIPTENSOR_OP_COS || op == HIPTENSOR_OP_TAN || op == HIPTENSOR_OP_SINH
+                   || op == HIPTENSOR_OP_COSH || op == HIPTENSOR_OP_ASIN || op == HIPTENSOR_OP_ACOS
+                   || op == HIPTENSOR_OP_ATAN || op == HIPTENSOR_OP_ASINH
+                   || op == HIPTENSOR_OP_ACOSH || op == HIPTENSOR_OP_ATANH
+                   || op == HIPTENSOR_OP_CEIL || op == HIPTENSOR_OP_FLOOR;
         }
 
         hiptensorStatus_t makeProblem(hiptensorOperationDescriptor_t desc, ScalarProblem& problem)
@@ -195,6 +203,45 @@ namespace hiptensor
                 return value == Acc(0) ? Acc(0) : (value < Acc(0) ? -value : value);
             if(op == HIPTENSOR_OP_RELU)
                 return value < Acc(0) ? Acc(0) : value;
+            if(op == HIPTENSOR_OP_SQRT)
+                return sqrt(value);
+            if(op == HIPTENSOR_OP_RCP)
+                return Acc(1) / value;
+            if(op == HIPTENSOR_OP_SIGMOID)
+                return value >= Acc(0) ? Acc(1) / (Acc(1) + exp(-value))
+                                       : exp(value) / (Acc(1) + exp(value));
+            if(op == HIPTENSOR_OP_TANH)
+                return tanh(value);
+            if(op == HIPTENSOR_OP_EXP)
+                return exp(value);
+            if(op == HIPTENSOR_OP_LOG)
+                return log(value);
+            if(op == HIPTENSOR_OP_SIN)
+                return sin(value);
+            if(op == HIPTENSOR_OP_COS)
+                return cos(value);
+            if(op == HIPTENSOR_OP_TAN)
+                return tan(value);
+            if(op == HIPTENSOR_OP_SINH)
+                return sinh(value);
+            if(op == HIPTENSOR_OP_COSH)
+                return cosh(value);
+            if(op == HIPTENSOR_OP_ASIN)
+                return asin(value);
+            if(op == HIPTENSOR_OP_ACOS)
+                return acos(value);
+            if(op == HIPTENSOR_OP_ATAN)
+                return atan(value);
+            if(op == HIPTENSOR_OP_ASINH)
+                return asinh(value);
+            if(op == HIPTENSOR_OP_ACOSH)
+                return acosh(value);
+            if(op == HIPTENSOR_OP_ATANH)
+                return atanh(value);
+            if(op == HIPTENSOR_OP_CEIL)
+                return ceil(value);
+            if(op == HIPTENSOR_OP_FLOOR)
+                return floor(value);
             return value;
         }
 
@@ -222,7 +269,13 @@ namespace hiptensor
                     dOffset += coordinate * p.dStrides[i];
                 }
                 Acc sum = 0;
-                if(alpha != Acc(0))
+                // Common GEMM/dot contractions need no mixed-radix division in
+                // the inner loop. Preserve the generic mapping for multiple sums.
+                if(alpha != Acc(0) && p.sumModes == 1)
+                    for(uint64_t k = 0; k < p.sumElements; ++k)
+                        sum += unary(Acc(a[aBase + k * p.aStrides[p.freeModes]]), p.opA)
+                               * unary(Acc(b[bBase + k * p.bStrides[p.freeModes]]), p.opB);
+                else if(alpha != Acc(0))
                     for(uint64_t k = 0; k < p.sumElements; ++k)
                     {
                         uint64_t contracted = k, aOffset = aBase, bOffset = bBase;
