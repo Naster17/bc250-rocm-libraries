@@ -211,9 +211,11 @@ hiptensorStatus_t hiptensorCreateContraction(const hiptensorHandle_t            
     bool scalar = handle->getDevice().getGcnArch() == hiptensor::HipDevice::GFX1013;
     if(scalar)
     {
-        if(descCompute != HIPTENSOR_COMPUTE_DESC_32F && descCompute != HIPTENSOR_COMPUTE_DESC_64F)
+        if(descCompute != HIPTENSOR_COMPUTE_DESC_32F && descCompute != HIPTENSOR_COMPUTE_DESC_64F
+           && descCompute != HIPTENSOR_COMPUTE_DESC_C32F && descCompute != HIPTENSOR_COMPUTE_DESC_C64F)
             return HIPTENSOR_STATUS_NOT_SUPPORTED;
-        if(descCompute == HIPTENSOR_COMPUTE_DESC_64F && !handle->getDevice().supportsF64())
+        if((descCompute == HIPTENSOR_COMPUTE_DESC_64F || descCompute == HIPTENSOR_COMPUTE_DESC_C64F)
+           && !handle->getDevice().supportsF64())
             return HIPTENSOR_STATUS_ARCH_MISMATCH;
     }
     else if(!handle->getDevice().matrixCoreSupport(descCompute))
