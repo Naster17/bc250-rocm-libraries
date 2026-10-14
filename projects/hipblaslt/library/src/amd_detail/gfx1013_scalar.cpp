@@ -415,8 +415,12 @@ namespace gfx1013_scalar
                 return HIPBLAS_STATUS_INVALID_VALUE;
             if constexpr(Outputs == 1 && !Cooperative)
             {
+                // The eight-output subgroup grid can be larger than the tiled
+                // grid bounded by validate(). Preserve that API bound even for
+                // descriptors too large for this board's physical memory.
+                const uint64_t subgroup_blocks = (d->m * d->n * uint64_t(d->batch_count) + 7) / 8;
                 if(((d->m <= 32 && d->n <= 32 && d->m * d->n <= 512) || d->m <= 4 || d->n <= 4)
-                   && k <= 64)
+                   && k <= 64 && subgroup_blocks <= uint64_t(INT_MAX))
                     return launch<Input, Output, 1, true>(
                         op, a, b, c, d, alpha, A, B, beta, C, D, stream);
                 // Small/skinny problems retain the finer grid; larger matrices reuse
