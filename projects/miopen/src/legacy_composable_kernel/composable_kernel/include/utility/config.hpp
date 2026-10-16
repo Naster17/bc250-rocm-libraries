@@ -18,11 +18,12 @@
 // must enable one and only one GPU target
 #if !(defined(CK_AMD_GPU_GFX803) || defined(CK_AMD_GPU_GFX900) || defined(CK_AMD_GPU_GFX906) ||    \
       defined(CK_AMD_GPU_GFX908) || defined(CK_AMD_GPU_GFX90A) || defined(CK_AMD_GPU_GFX942) ||    \
-      defined(CK_AMD_GPU_GFX950) || defined(CK_AMD_GPU_GFX1030) || defined(CK_AMD_GPU_GFX1031) ||  \
-      defined(CK_AMD_GPU_GFX1036) || defined(CK_AMD_GPU_GFX1100) || defined(CK_AMD_GPU_GFX1101) || \
-      defined(CK_AMD_GPU_GFX1102) || defined(CK_AMD_GPU_GFX1103) || defined(CK_AMD_GPU_GFX1150) || \
-      defined(CK_AMD_GPU_GFX1151) || defined(CK_AMD_GPU_GFX1152) || defined(CK_AMD_GPU_GFX1153) || \
-      defined(CK_AMD_GPU_GFX1200) || defined(CK_AMD_GPU_GFX1201) || defined(CK_AMD_GPU_GFX1250))
+      defined(CK_AMD_GPU_GFX950) || defined(CK_AMD_GPU_GFX1013) || defined(CK_AMD_GPU_GFX1030) ||  \
+      defined(CK_AMD_GPU_GFX1031) || defined(CK_AMD_GPU_GFX1036) || defined(CK_AMD_GPU_GFX1100) || \
+      defined(CK_AMD_GPU_GFX1101) || defined(CK_AMD_GPU_GFX1102) || defined(CK_AMD_GPU_GFX1103) || \
+      defined(CK_AMD_GPU_GFX1150) || defined(CK_AMD_GPU_GFX1151) || defined(CK_AMD_GPU_GFX1152) || \
+      defined(CK_AMD_GPU_GFX1153) || defined(CK_AMD_GPU_GFX1200) || defined(CK_AMD_GPU_GFX1201) || \
+      defined(CK_AMD_GPU_GFX1250))
 #error No CK_AMD_GPU_GFX* macro defined. Exactly one target must be defined.
 #endif
 
@@ -39,11 +40,11 @@
     defined(CK_AMD_GPU_GFX942) || defined(CK_AMD_GPU_GFX908) || defined(CK_AMD_GPU_GFX90A) || \
     defined(CK_AMD_GPU_GFX950)
 #define CK_BUFFER_RESOURCE_3RD_DWORD 0x00020000
-#elif defined(CK_AMD_GPU_GFX1030) || defined(CK_AMD_GPU_GFX1031) || defined(CK_AMD_GPU_GFX1036) || \
-    defined(CK_AMD_GPU_GFX1100) || defined(CK_AMD_GPU_GFX1101) || defined(CK_AMD_GPU_GFX1102) ||   \
-    defined(CK_AMD_GPU_GFX1103) || defined(CK_AMD_GPU_GFX1150) || defined(CK_AMD_GPU_GFX1151) ||   \
-    defined(CK_AMD_GPU_GFX1152) || defined(CK_AMD_GPU_GFX1153) || defined(CK_AMD_GPU_GFX1200) ||   \
-    defined(CK_AMD_GPU_GFX1201)
+#elif defined(CK_AMD_GPU_GFX1013) || defined(CK_AMD_GPU_GFX1030) || defined(CK_AMD_GPU_GFX1031) || \
+    defined(CK_AMD_GPU_GFX1036) || defined(CK_AMD_GPU_GFX1100) || defined(CK_AMD_GPU_GFX1101) ||   \
+    defined(CK_AMD_GPU_GFX1102) || defined(CK_AMD_GPU_GFX1103) || defined(CK_AMD_GPU_GFX1150) ||   \
+    defined(CK_AMD_GPU_GFX1151) || defined(CK_AMD_GPU_GFX1152) || defined(CK_AMD_GPU_GFX1153) ||   \
+    defined(CK_AMD_GPU_GFX1200) || defined(CK_AMD_GPU_GFX1201)
 #define CK_BUFFER_RESOURCE_3RD_DWORD 0x31014000
 #elif defined(CK_AMD_GPU_GFX1250)
 // gfx1250: word-3 must be 0 (matches CK ck.hpp); otherwise buffer_load treats
@@ -54,7 +55,10 @@
 #endif
 
 // FMA instruction
-#if defined(CK_AMD_GPU_GFX803) || defined(CK_AMD_GPU_GFX900)
+#if defined(CK_AMD_GPU_GFX1013)
+// Native RDNA1 supports scalar FMA, not the packed-dot/XDLOPS profile below.
+#define CK_USE_AMD_V_FMAC_F32
+#elif defined(CK_AMD_GPU_GFX803) || defined(CK_AMD_GPU_GFX900)
 #define CK_USE_AMD_V_MAC_F32
 #elif defined(CK_AMD_GPU_GFX906) || defined(CK_AMD_GPU_GFX908) || defined(CK_AMD_GPU_GFX90a) ||  \
     defined(CK_AMD_GPU_GFX942) || defined(CK_AMD_GPU_GFX1030) || defined(CK_AMD_GPU_GFX1031) ||  \
@@ -69,12 +73,22 @@
 
 // AMD inline asm
 #ifndef CK_USE_AMD_INLINE_ASM
+#if defined(CK_AMD_GPU_GFX1013)
+// Keep the legacy header's unguarded packed-dot assembly out of this profile.
+#define CK_USE_AMD_INLINE_ASM 0
+#else
 #define CK_USE_AMD_INLINE_ASM 1
+#endif
 #endif
 
 // AMD inner product (DLOP)
 #ifndef CK_USE_AMD_INNER_PRODUCT_INLINE_ASM
+#if defined(CK_AMD_GPU_GFX1013)
+// Keep the legacy header's unguarded packed-dot assembly out of this profile.
+#define CK_USE_AMD_INNER_PRODUCT_INLINE_ASM 0
+#else
 #define CK_USE_AMD_INNER_PRODUCT_INLINE_ASM 1
+#endif
 #endif
 
 // AMD buffer addressing
@@ -90,6 +104,9 @@
 // AMD XDLOPS
 #ifndef CK_USE_AMD_XDLOPS
 #define CK_USE_AMD_XDLOPS 0
+#endif
+#if defined(CK_AMD_GPU_GFX1013) && CK_USE_AMD_XDLOPS
+#error Native gfx1013 does not support XDLOPS.
 #endif
 
 // block synchronization only s_wait lgkmcnt(0), not vmcnt(0)
