@@ -59,9 +59,12 @@ std::size_t GetWorkSpaceSizeGEMM(const miopen::ExecutionContext& ctx,
                                  const conv::ProblemDescription& problem)
 {
 #if MIOPEN_USE_GEMM
-    if(env::disabled(MIOPEN_DEBUG_CONV_GEMM) ||
-       miopen::any_of(problem.GetConv().GetConvDilations(), [](auto v) { return v > 1; }))
+    if(env::disabled(MIOPEN_DEBUG_CONV_GEMM))
         return 0;
+
+    // Use the same solver applicability/workspace contracts as Find. The GEMM
+    // im2col/col2im paths support dilation; excluding it here under-allocates
+    // workspace for solvers that Find can legitimately evaluate.
 
     return GetMaxWorkSpaceSize(AllGemmWorkspaceSize(ctx, problem));
 #else
