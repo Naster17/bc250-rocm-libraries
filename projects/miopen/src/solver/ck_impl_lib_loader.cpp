@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include <miopen/solver/ck_impl_lib_loader.hpp>
+#include <miopen/config.h>
+#include <miopen/solver/ck_utility_common.hpp>
 #include <miopen/solver/ck_impl_error.hpp>
 #include <miopen/solver/ck_impl_interface.hpp>
 #include <miopen/conv_solution.hpp>
@@ -207,9 +209,7 @@ const CkImplLibLoader& CkImplLibLoader::Get(const std::string& device_name)
 // -- Construction / Destruction -----------------------------------------------
 
 CkImplLibLoader::CkImplLibLoader(const std::string& device_name)
-{
-    OpenRuntimeLibraryForDevice(device_name);
-}
+{ OpenRuntimeLibraryForDevice(device_name); }
 
 CkImplLibLoader::~CkImplLibLoader()
 {
@@ -221,10 +221,21 @@ CkImplLibLoader::~CkImplLibLoader()
 
 void CkImplLibLoader::OpenRuntimeLibraryForDevice(const std::string& device_name)
 {
+    // A missing optional plugin is expected when disabled at build time or when
+    // the device is outside the solver capability whitelist. An explicit path
+    // still permits development plugins and retains genuine loader diagnostics.
+    const auto env_path = env::value(MIOPEN_CK_LIB_PATH);
+    if(env_path.empty() &&
+       (!MIOPEN_USE_COMPOSABLEKERNEL || !ck_utility::is_ck_whitelist(device_name)))
+    {
+        MIOPEN_LOG_I2("CK grouped conv is not enabled for device "
+                      << StripDeviceSuffix(device_name));
+        return;
+    }
+
     const miopen::fs::path filename{MakeLibraryFilename(device_name)};
 
     // 1. Try MIOPEN_CK_LIB_PATH environment variable
-    const auto env_path = env::value(MIOPEN_CK_LIB_PATH);
     if(!env_path.empty())
     {
         const auto full_path = miopen::fs::path{env_path} / filename;
@@ -294,9 +305,7 @@ void CkImplLibLoader::OpenRuntimeLibraryForDevice(const std::string& device_name
 // -- Symbol resolution --------------------------------------------------------
 
 void* CkImplLibLoader::ResolveRawSymbol(const char* symbol_name) const
-{
-    return ResolveDynamicSymbol(lib_handle_, symbol_name);
-}
+{ return ResolveDynamicSymbol(lib_handle_, symbol_name); }
 
 void CkImplLibLoader::BindRequiredCommonSymbols(std::vector<std::string>& missing)
 {
