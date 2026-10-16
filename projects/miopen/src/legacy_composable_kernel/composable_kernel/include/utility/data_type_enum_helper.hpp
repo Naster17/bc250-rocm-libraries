@@ -30,6 +30,13 @@ struct get_datatype_from_enum<DataTypeEnum_t::Half>
     using type = half_t;
 };
 
+// BF16 uses the existing ushort storage and type_convert specializations.
+template <>
+struct get_datatype_from_enum<DataTypeEnum_t::BFloat16>
+{
+    using type = ushort;
+};
+
 template <>
 struct get_datatype_from_enum<DataTypeEnum_t::Float>
 {
@@ -61,6 +68,12 @@ template <>
 struct get_datatype_enum_from_type<half_t>
 {
     static constexpr DataTypeEnum_t value = DataTypeEnum_t::Half;
+};
+
+template <>
+struct get_datatype_enum_from_type<ushort>
+{
+    static constexpr DataTypeEnum_t value = DataTypeEnum_t::BFloat16;
 };
 
 template <>

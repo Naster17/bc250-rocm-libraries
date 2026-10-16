@@ -226,12 +226,19 @@ __device__ typename vector_type<T, N>::type amd_buffer_load_impl(int32x4_t src_w
     static_assert(
         (is_same<T, double>::value && (N == 1 || N == 2 || N == 4)) ||
             (is_same<T, float>::value && (N == 1 || N == 2 || N == 4 || N == 8)) ||
-            (is_same<T, half_t>::value && (N == 1 || N == 2 || N == 4 || N == 8)) ||
+            ((is_same<T, half_t>::value || is_same<T, ushort>::value) &&
+             (N == 1 || N == 2 || N == 4 || N == 8)) ||
             (is_same<T, int32_t>::value && (N == 1 || N == 2 || N == 4 || N == 8)) ||
             (is_same<T, int8_t>::value && (N == 1 || N == 2 || N == 4 || N == 8 || N == 16)),
         "wrong! not implemented");
 
-    if constexpr(is_same<T, double>::value)
+    if constexpr(is_same<T, ushort>::value)
+    {
+        // BF16 storage: reuse the 16-bit raw load without numeric conversion.
+        return as_type<typename vector_type<ushort, N>::type>(amd_buffer_load_impl<half_t, N>(
+            src_wave_buffer_resource, src_thread_addr_offset, src_wave_addr_offset));
+    }
+    else if constexpr(is_same<T, double>::value)
     {
         // use fp32 load to mimic fp64 load
         if constexpr(N == 1)
@@ -456,12 +463,22 @@ __device__ void amd_buffer_store_impl(const typename vector_type<T, N>::type src
     static_assert(
         (is_same<T, double>::value && (N == 1 || N == 2)) ||
             (is_same<T, float>::value && (N == 1 || N == 2 || N == 4)) ||
-            (is_same<T, half_t>::value && (N == 1 || N == 2 || N == 4 || N == 8)) ||
+            ((is_same<T, half_t>::value || is_same<T, ushort>::value) &&
+             (N == 1 || N == 2 || N == 4 || N == 8)) ||
             (is_same<T, int32_t>::value && (N == 1 || N == 2 || N == 4)) ||
             (is_same<T, int8_t>::value && (N == 1 || N == 2 || N == 4 || N == 8 || N == 16)),
         "wrong! not implemented");
 
-    if constexpr(is_same<T, double>::value)
+    if constexpr(is_same<T, ushort>::value)
+    {
+        // Preserve BF16 bits, including NaNs; this is not FP16 arithmetic.
+        amd_buffer_store_impl<half_t, N>(
+            as_type<typename vector_type<half_t, N>::type>(src_thread_data),
+            dst_wave_buffer_resource,
+            dst_thread_addr_offset,
+            dst_wave_addr_offset);
+    }
+    else if constexpr(is_same<T, double>::value)
     {
         // use fp32 store to mimic fp64 store
         if constexpr(N == 1)

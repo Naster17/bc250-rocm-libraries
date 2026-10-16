@@ -61,9 +61,9 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
     __device__ static void Run(const src2dDescType& src2dDesc,
                                const dst1dDescType& dst1dDesc,
                                int origReduceLen,
-                               srcDataType alpha,
+                               compType alpha,
                                const srcDataType* const __restrict__ p_src_global,
-                               dstDataType beta,
+                               compType beta,
                                dstDataType* const __restrict__ p_dst_global,
                                const int* const __restrict__ ws_indices_global,
                                int* const __restrict__ indices_global);
@@ -72,9 +72,9 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
     __device__ static void Run<1>(const src2dDescType& src2dDesc,
                                   const dst1dDescType& dst1dDesc,
                                   int origReduceLen,
-                                  srcDataType alpha,
+                                  compType alpha,
                                   const srcDataType* const __restrict__ p_src_global,
-                                  dstDataType beta,
+                                  compType beta,
                                   dstDataType* const __restrict__ p_dst_global,
                                   const int* const __restrict__ ws_indices_global,
                                   int* const __restrict__ indices_global)
@@ -147,9 +147,10 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
         if(!float_equal_one{}(alpha))
             accuValue_buf(I0) *= type_convert<compType>{}(alpha);
 
-        StaticBuffer<AddressSpaceEnum_t::Vgpr, dstDataType, 1, true> dstValue_buf;
+        // Scale and combine in compute precision; BF16 storage is raw ushort.
+        StaticBuffer<AddressSpaceEnum_t::Vgpr, compType, 1, true> dstValue_buf;
 
-        dstValue_buf(I0) = type_convert<dstDataType>{}(accuValue_buf[I0]);
+        dstValue_buf(I0) = accuValue_buf[I0];
 
         if(!float_equal_zero{}(beta))
         {
@@ -170,11 +171,11 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
             threadwise_dst_load.Run(
                 dst1dDesc, dst_global_buf, ReducedDataDesc, make_tuple(I0), priorDstValue_buf);
 
-            dstValue_buf(I0) += priorDstValue_buf[I0] * beta;
+            dstValue_buf(I0) += type_convert<compType>{}(priorDstValue_buf[I0]) * beta;
         }
 
         auto threadwise_dst_store =
-            ThreadwiseTensorSliceTransfer_v1r3<dstDataType,
+            ThreadwiseTensorSliceTransfer_v1r3<compType,
                                                dstDataType,
                                                decltype(ReducedDataDesc),
                                                dst1dDescType,
@@ -195,9 +196,9 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
     __device__ static void Run<2>(const src2dDescType& src2dDesc,
                                   const dst1dDescType& dst1dDesc,
                                   int origReduceLen,
-                                  srcDataType alpha,
+                                  compType alpha,
                                   const srcDataType* const __restrict__ p_src_global,
-                                  dstDataType beta,
+                                  compType beta,
                                   dstDataType* const __restrict__ p_dst_global,
                                   const int* const __restrict__ ws_indices_global,
                                   int* const __restrict__ indices_global)
@@ -275,9 +276,10 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
         if(!float_equal_one{}(alpha))
             accuValue_buf(I0) *= type_convert<compType>{}(alpha);
 
-        StaticBuffer<AddressSpaceEnum_t::Vgpr, dstDataType, 1, true> dstValue_buf;
+        // Scale and combine in compute precision; BF16 storage is raw ushort.
+        StaticBuffer<AddressSpaceEnum_t::Vgpr, compType, 1, true> dstValue_buf;
 
-        dstValue_buf(I0) = type_convert<dstDataType>{}(accuValue_buf[I0]);
+        dstValue_buf(I0) = accuValue_buf[I0];
 
         if(!float_equal_zero{}(beta))
         {
@@ -298,11 +300,11 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
             threadwise_dst_load.Run(
                 dst1dDesc, dst_global_val_buf, ReducedDataDesc, make_tuple(I0), priorDstValue_buf);
 
-            dstValue_buf(I0) += priorDstValue_buf[I0] * beta;
+            dstValue_buf(I0) += type_convert<compType>{}(priorDstValue_buf[I0]) * beta;
         }
 
         auto threadwise_dst_val_store =
-            ThreadwiseTensorSliceTransfer_v1r3<dstDataType,
+            ThreadwiseTensorSliceTransfer_v1r3<compType,
                                                dstDataType,
                                                decltype(ReducedDataDesc),
                                                dst1dDescType,
@@ -339,9 +341,9 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
     __device__ static void Run<3>(const src2dDescType& src2dDesc,
                                   const dst1dDescType& dst1dDesc,
                                   int origReduceLen,
-                                  srcDataType alpha,
+                                  compType alpha,
                                   const srcDataType* const __restrict__ ws_values_global,
-                                  dstDataType beta,
+                                  compType beta,
                                   dstDataType* const __restrict__ p_dst_global,
                                   const int* const __restrict__ ws_indices_global,
                                   int* const __restrict__ indices_global)
@@ -438,9 +440,10 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
         if(!float_equal_one{}(alpha))
             accuValue_buf(I0) *= type_convert<compType>{}(alpha);
 
-        StaticBuffer<AddressSpaceEnum_t::Vgpr, dstDataType, 1, true> dstValue_buf;
+        // Scale and combine in compute precision; BF16 storage is raw ushort.
+        StaticBuffer<AddressSpaceEnum_t::Vgpr, compType, 1, true> dstValue_buf;
 
-        dstValue_buf(I0) = type_convert<dstDataType>{}(accuValue_buf[I0]);
+        dstValue_buf(I0) = accuValue_buf[I0];
 
         if(!float_equal_zero{}(beta))
         {
@@ -461,11 +464,11 @@ struct GridwiseReduction_xy_to_x_direct_threadwise
             threadwise_dst_load.Run(
                 dst1dDesc, dst_global_val_buf, ReducedDataDesc, make_tuple(I0), priorDstValue_buf);
 
-            dstValue_buf(I0) += priorDstValue_buf[I0] * beta;
+            dstValue_buf(I0) += type_convert<compType>{}(priorDstValue_buf[I0]) * beta;
         }
 
         auto threadwise_dst_val_store =
-            ThreadwiseTensorSliceTransfer_v1r3<dstDataType,
+            ThreadwiseTensorSliceTransfer_v1r3<compType,
                                                dstDataType,
                                                decltype(ReducedDataDesc),
                                                dst1dDescType,

@@ -556,6 +556,11 @@ void ReduceTensorDescriptor::ReduceTensor(const Handle& handle,
     const auto reduceIndicesOpt  = this->reduceTensorIndices_;
     const auto reduceIndicesType = this->reduceTensorIndicesType_;
 
+    // BF16 storage conversion is defined only through FP32 in this legacy CK copy.
+    // Reject other compute types before a kernel can treat ushort bits as values.
+    if((srcDataType == miopenBFloat16 || dstDataType == miopenBFloat16) && compType != miopenFloat)
+        MIOPEN_THROW(miopenStatusNotImplemented, "BF16 reductions require FP32 compute.");
+
     const auto& inDescLengths  = aDesc.GetLengths();
     const auto& inDescStrides  = aDesc.GetStrides();
     const auto& outDescLengths = cDesc.GetLengths();
@@ -695,6 +700,10 @@ void ReduceTensorDescriptor::ReduceTensor(const Handle& handle,
         std::string network_config;
 
         param = solver::legacy_ck::get_ck_common_compiler_flag(handle);
+        // Headers are embedded in the library but absent from the binary-cache key.
+        // Isolate the corrected BF16 conversions and compute-precision epilogue
+        // from kernels compiled by earlier builds of this same MIOpen version.
+        param += " -DMIOPEN_REDUCTION_KERNEL_VERSION=2";
 
         param += detailDynamic::get_definition_string_from_type_enums(
                      srcDataType, compType, dstDataType) +
@@ -714,7 +723,8 @@ void ReduceTensorDescriptor::ReduceTensor(const Handle& handle,
 
         float time_reduce = 0.0f;
 
-        network_config = detailDynamic::get_network_config_string_from_type_enums(
+        network_config = "V2_" +
+                         detailDynamic::get_network_config_string_from_type_enums(
                              srcDataType, compType, dstDataType) +
                          "_" + detailDynamic::get_network_config_string_from_tunable(tunable) + "_";
 

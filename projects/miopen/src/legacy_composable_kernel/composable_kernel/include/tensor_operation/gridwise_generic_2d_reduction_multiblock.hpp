@@ -64,9 +64,9 @@ struct GridwiseReduction_xy_to_x_multiblock
                                const dst1dDescType& dst1dDesc,
                                int origReduceLen,
                                int BlkGroupSize,
-                               srcDataType alpha,
+                               compType alpha,
                                const srcDataType* const __restrict__ p_src_global,
-                               dstDataType beta,
+                               compType beta,
                                srcDataType* const __restrict__ ws_values_global,
                                int* const __restrict__ ws_indices_global);
 
@@ -75,9 +75,9 @@ struct GridwiseReduction_xy_to_x_multiblock
                                   const dst1dDescType& dst1dDesc,
                                   int origReduceLen,
                                   int BlkGroupSize,
-                                  srcDataType alpha,
+                                  compType alpha,
                                   const srcDataType* const __restrict__ p_src_global,
-                                  dstDataType beta,
+                                  compType beta,
                                   srcDataType* const __restrict__ ws_values_global,
                                   int* const __restrict__ ws_indices_global)
     {
@@ -207,9 +207,9 @@ struct GridwiseReduction_xy_to_x_multiblock
                                   const dst1dDescType& dst1dDesc,
                                   int origReduceLen,
                                   int BlkGroupSize,
-                                  srcDataType alpha,
+                                  compType alpha,
                                   const srcDataType* const __restrict__ p_src_global,
-                                  dstDataType beta,
+                                  compType beta,
                                   srcDataType* const __restrict__ ws_values_global,
                                   int* const __restrict__ ws_indices_global)
     {
