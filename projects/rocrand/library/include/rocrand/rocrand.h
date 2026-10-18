@@ -649,8 +649,8 @@ rocrand_status ROCRANDAPI rocrand_set_seed_uint4(rocrand_generator generator, ui
  * - This operation resets the generator's internal state.
  * - This operation does not change the generator's seed.
  *
- * Absolute offset cannot be set if generator's type is ROCRAND_RNG_PSEUDO_MTGP32 or
- * ROCRAND_RNG_PSEUDO_LFSR113.
+ * Absolute offset cannot be set if generator's type is ROCRAND_RNG_PSEUDO_MTGP32.
+ * LFSR113 supports absolute offsets through this C API.
  *
  * \param generator Random number generator
  * \param offset New absolute offset
@@ -658,8 +658,7 @@ rocrand_status ROCRANDAPI rocrand_set_seed_uint4(rocrand_generator generator, ui
  * \return
  * - ROCRAND_STATUS_NOT_CREATED if the generator wasn't created \n
  * - ROCRAND_STATUS_SUCCESS if offset was successfully set \n
- * - ROCRAND_STATUS_TYPE_ERROR if generator's type is ROCRAND_RNG_PSEUDO_MTGP32 or
- * ROCRAND_RNG_PSEUDO_LFSR113
+ * - ROCRAND_STATUS_TYPE_ERROR if generator's type is ROCRAND_RNG_PSEUDO_MTGP32
  */
 rocrand_status ROCRANDAPI rocrand_set_offset(rocrand_generator  generator,
                                              unsigned long long offset);
