@@ -246,9 +246,10 @@ namespace Tensile
                     }
 
                     std::shared_ptr<MySolution> solution = getSolutionByIndex(*sol_idx);
-                    if(!solution)
+                    if(!solution || solution->codeObjectFilename.load().empty())
                     {
-                        // Load library
+                        // Preloaded metadata can lack its architecture-specific code object.
+                        // Resolve through the lazy library before caching an override.
                         auto problem = ps.first.problem();
                         library->findAllSolutions(problem, hardware);
                         solution = getSolutionByIndex(*sol_idx);
