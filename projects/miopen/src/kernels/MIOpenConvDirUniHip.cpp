@@ -11,7 +11,10 @@
 // Since float_types.h has enabled true mixed precision for all
 // direct kernels, this kernel needs to retain its older behavior as it is
 // dependent upon tunability which isn't slated for MIOpen 2.0 PR #1725
-#if MIOPEN_USE_FP16 == 1
+// Native gfx1013 forward uses the mixed-precision accumulator from float_types.h.
+// The legacy half accumulator loses accuracy on ordinary non-dyadic inputs.
+// Keep the historical behavior for other devices and backward kernels.
+#if MIOPEN_USE_FP16 == 1 && !(defined(__gfx1013__) && MLO_DIR_FORWARD == 1)
 #undef FLOAT_ACCUM
 #define FLOAT_ACCUM FLOAT
 #define CVT_FLOAT2ACCUM(x) ((FLOAT_ACCUM)(x))
