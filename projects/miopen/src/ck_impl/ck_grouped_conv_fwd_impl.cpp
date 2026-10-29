@@ -43,9 +43,33 @@ using DeviceOpGFwd = ck::tensor_operation::device::DeviceGroupedConvFwdMultipleA
     ck::tensor_operation::element_wise::PassThrough,
     ComputeType>;
 
+#ifdef MIOPEN_BC250_DL_PRIVATE
+// Older DL instances omit vector-transfer parameters from GetTypeString().
+// The plugin selects by that string, so expose only the first instance per ID.
+// Keep the production factory unchanged until separately qualified.
+template <typename DataType, typename ComputeType = DataType>
+struct DeviceOpGFwdPtrs
+{
+    static auto GetInstances()
+    {
+        auto result = ck::tensor_operation::device::instance::DeviceOperationInstanceFactory<
+            DeviceOpGFwd<DataType, ComputeType>>::GetInstances();
+        std::vector<std::string> seen;
+        result.erase(std::remove_if(result.begin(), result.end(), [&](const auto& op) {
+            auto id = op->GetTypeString();
+            if(std::find(seen.begin(), seen.end(), id) != seen.end())
+                return true;
+            seen.push_back(std::move(id));
+            return false;
+        }), result.end());
+        return result;
+    }
+};
+#else
 template <typename DataType, typename ComputeType = DataType>
 using DeviceOpGFwdPtrs = ck::tensor_operation::device::instance::DeviceOperationInstanceFactory<
     DeviceOpGFwd<DataType, ComputeType>>;
+#endif
 
 // ---------------------------------------------------------------------------
 // CKArgs — extracts convolution dimensions for CK argument construction.
