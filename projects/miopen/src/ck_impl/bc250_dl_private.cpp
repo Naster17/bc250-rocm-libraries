@@ -13,12 +13,18 @@
 #define ck_impl_fwd_is_args_supported bc250_upstream_fwd_is_args_supported
 #define ck_impl_fwd_get_workspace_size bc250_upstream_fwd_get_workspace_size
 #define ck_impl_fwd_get_solution bc250_upstream_fwd_get_solution
+#ifdef MIOPEN_BC250_DL_FP16_PRIVATE
+#define ck_impl_fwd_get_all_kernel_type_strings bc250_upstream_fwd_get_all_kernel_type_strings
+#endif
 #include "ck_grouped_conv_fwd_impl.cpp"
 #undef ck_impl_fwd_fill_valid_kernels
 #undef ck_impl_fwd_is_applicable
 #undef ck_impl_fwd_is_args_supported
 #undef ck_impl_fwd_get_workspace_size
 #undef ck_impl_fwd_get_solution
+#ifdef MIOPEN_BC250_DL_FP16_PRIVATE
+#undef ck_impl_fwd_get_all_kernel_type_strings
+#endif
 #include "ck_grouped_conv_common.cpp"
 
 // The host hides this accessor; retain the exact matching src/tensor.cpp
@@ -31,9 +37,13 @@ std::optional<miopenDataType_t> miopen::TensorDescriptor::GetCastType() const
 namespace {
 bool admitted(const miopen::conv::ProblemDescription* p, miopenDataType_t type, bool tf32)
 {
-    if(p == nullptr || type != miopenFloat || tf32 || !p->Is2d() || !p->IsDirectionForward() ||
-       p->GetInDataType() != miopenFloat || p->GetWeightsDataType() != miopenFloat ||
-       p->GetOutDataType() != miopenFloat || p->HasMixedDataTypes() || p->IsTensorsCasted() ||
+    bool supported_type = type == miopenFloat;
+#ifdef MIOPEN_BC250_DL_FP16_PRIVATE
+    supported_type = supported_type || type == miopenHalf;
+#endif
+    if(p == nullptr || !supported_type || tf32 || !p->Is2d() || !p->IsDirectionForward() ||
+       p->GetInDataType() != type || p->GetWeightsDataType() != type ||
+       p->GetOutDataType() != type || p->HasMixedDataTypes() || p->IsTensorsCasted() ||
        p->HasNonPackedTensors() || !(p->IsLayoutDefault() || p->IsLayoutNHWC()) ||
        p->GetConv().attribute.deterministic || p->GetConv().mode != miopenConvolution ||
        p->GetBias() != 0 || p->GetAlpha().GetAsDouble() != 1.0 || p->GetBeta().GetAsDouble() != 0.0)
@@ -76,8 +86,9 @@ ck_impl_status_t empty_list(CKKernelListHandle** out)
 ck_impl_status_t unsupported()
 {
     return ck_impl_try_catch([] {
-        throw CkImplException(CK_IMPL_STATUS_INVALID_VALUE,
-                              "Private gfx1013 DL plugin supports packed 2D FP32 forward only");
+        throw CkImplException(
+            CK_IMPL_STATUS_INVALID_VALUE,
+            "Private gfx1013 DL forward request is outside the configured dtype/argument contract");
     });
 }
 } // namespace
@@ -140,7 +151,7 @@ extern "C" ck_impl_status_t ck_impl_fwd_get_solution(const miopen::ExecutionCont
     if(!admitted(p, p->GetInDataType(), tf32))
         return unsupported();
     bool valid  = false;
-    auto status = bc250_upstream_fwd_is_args_supported(p, id, miopenFloat, false, &valid);
+    auto status = bc250_upstream_fwd_is_args_supported(p, id, p->GetInDataType(), false, &valid);
     if(status != CK_IMPL_STATUS_SUCCESS)
         return status;
     if(!valid)
@@ -154,15 +165,22 @@ extern "C" ck_impl_status_t ck_impl_fwd_get_solution(const miopen::ExecutionCont
         CK_IMPL_THROW_IF_FALSE(solution && solution->invoker_factory,
                                CK_IMPL_STATUS_INTERNAL_ERROR,
                                "Missing DL invoker");
+        size_t alignment = alignof(float);
+#ifdef MIOPEN_BC250_DL_FP16_PRIVATE
+        // Conservatively cover the qualified half vector loads/stores. Native
+        // Torch and owned probe allocations are at least 256-byte aligned.
+        if(p->GetInDataType() == miopenHalf)
+            alignment = 16;
+#endif
         auto factory              = std::move(*solution->invoker_factory);
         solution->invoker_factory = [factory   = std::move(factory),
                                      x         = p->GetIn(),
                                      w         = p->GetWeights(),
                                      y         = p->GetOut(),
-                                     workspace = solution->workspace_sz](
-                                        const std::vector<miopen::Kernel>& kernels) {
+                                     workspace = solution->workspace_sz,
+                                     alignment](const std::vector<miopen::Kernel>& kernels) {
             auto invoke = factory(kernels);
-            return [invoke = std::move(invoke), x, w, y, workspace](
+            return [invoke = std::move(invoke), x, w, y, workspace, alignment](
                        const miopen::Handle& handle, const miopen::AnyInvokeParams& params) {
                 const auto& data = params.CastTo<miopen::conv::DataInvokeParams>();
                 const auto& t    = data.tensors;
@@ -172,10 +190,9 @@ extern "C" ck_impl_status_t ck_impl_fwd_get_solution(const miopen::ExecutionCont
                    !t.in || !t.w || !t.out || data.workSpaceSize < workspace ||
                    (workspace && !data.workSpace))
                     MIOPEN_THROW(miopenStatusBadParm, "Private DL invocation contract mismatch");
-                auto range = [](const void* pointer, size_t bytes) {
+                auto range = [alignment](const void* pointer, size_t bytes) {
                     const auto begin = reinterpret_cast<uintptr_t>(pointer);
-                    if(begin % alignof(float) ||
-                       bytes > std::numeric_limits<uintptr_t>::max() - begin)
+                    if(begin % alignment || bytes > std::numeric_limits<uintptr_t>::max() - begin)
                         MIOPEN_THROW(miopenStatusBadParm, "Private DL pointer alignment/range");
                     return std::make_pair(begin, begin + bytes);
                 };
@@ -200,6 +217,30 @@ extern "C" ck_impl_status_t ck_impl_fwd_get_solution(const miopen::ExecutionCont
         *out = solution.release();
     });
 }
+#ifdef MIOPEN_BC250_DL_FP16_PRIVATE
+// Type strings omit the dtype. Publish their union, while all per-problem queries
+// retain exact descriptor/type validation and the corresponding typed factory.
+extern "C" ck_impl_status_t ck_impl_fwd_get_all_kernel_type_strings(CKKernelListHandle** out)
+{
+    return ck_impl_try_catch([&] {
+        CK_IMPL_THROW_IF_NULL(out, CK_IMPL_STATUS_BAD_PARAM, "Null list output");
+        auto result = std::make_unique<CKKernelListHandle>();
+        auto add    = [&](auto value) {
+            for(const auto& op : DeviceOpGFwdPtrs<decltype(value)>::GetInstances())
+            {
+                const auto id = op->GetTypeString();
+                if(std::find(result->kernels.begin(), result->kernels.end(), id) ==
+                   result->kernels.end())
+                    result->kernels.push_back(id);
+            }
+        };
+        add(float{});
+        add(ck::half_t{});
+        *out = result.release();
+    });
+}
+#endif
+
 // The loader requires every solver group even for a forward-only private plugin.
 #define BC250_UNSUPPORTED_GROUP(prefix)                                                 \
     extern "C" ck_impl_status_t ck_impl_##prefix##_fill_valid_kernels(                  \
