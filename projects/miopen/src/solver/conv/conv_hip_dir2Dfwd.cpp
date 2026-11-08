@@ -460,6 +460,13 @@ ConvSolution ConvHipDirectFwd::BaseGetSolution(const ExecutionContext& ctx,
     kernel_params.g_wk.push_back(gbl_wk1);
     kernel_params.g_wk.push_back(gbl_wk2);
 
+    // The gfx1013 FP16 forward kernel now accumulates in FP32. Both user and
+    // system binary caches key on the filename and compile options, not source
+    // contents. Keep legacy binaries from bypassing the corrected arithmetic.
+    if(ctx.GetStream().GetDeviceName() == "gfx1013" && problem.IsDirectionForward() &&
+       problem.IsFp16())
+        kernel_params.comp_options += " -DBC250_DIRECT_FWD_FP32_ACCUM_CACHE=1";
+
     kernel_params.kernel_file = "MIOpenConvDirUniHip.cpp";
     kernel_params.kernel_name = "MIOpenConvUni";
 
